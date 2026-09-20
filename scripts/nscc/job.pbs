@@ -1,19 +1,29 @@
 #!/bin/bash
+# Serves one model, then runs one or more arms against it in parallel.
+# ARMS is a space separated list of policy:k pairs.
 #
-#   qsub -P personal-jonatha4 scripts/nscc/job.pbs
-#   qsub -P personal-jonatha4 -v CMD="scripts/run_benchmark.py --policy cascade --k 3 --force-rerun" scripts/nscc/job.pbs
-#
+#   smoke, one task:
+#     qsub -P personal-jonatha4 -v "USER_TASKS=user_task_0" scripts/nscc/job.pbs
+#   clean runs, all arms:
+#     qsub -P personal-jonatha4 -v "ARMS=full_approve:inf full_escalate:0 cascade:3" scripts/nscc/job.pbs
+#   attack runs:
+#     qsub -P personal-jonatha4 -v "ATTACK=important_instructions_generic,INJ=injection_task_0 injection_task_1" scripts/nscc/job.pbs
 #PBS -N egate
 #PBS -q normal
 #PBS -l select=1:ngpus=1
-#PBS -l walltime=04:00:00
+#PBS -l walltime=12:00:00
 #PBS -j oe
 
 set -uo pipefail
 cd "$PBS_O_WORKDIR" || exit 1
 
-MODEL="${MODEL:-Qwen/Qwen3.8-27B-FP8}"
-CMD="${CMD:-scripts/run_benchmark.py --policy full_approve --user-tasks user_task_0 --force-rerun}"
+MODEL="${MODEL:-cyankiwi/Qwen3.8-27B-AWQ-INT4}"
+ARMS="${ARMS:-full_approve:inf full_escalate:0 full_escalate:1 full_escalate:3 full_escalate:inf cascade:0 cascade:1 cascade:3 cascade:inf}"
+ATTACK="${ATTACK:-}"
+INJ="${INJ:-}"
+USER_TASKS="${USER_TASKS:-}"
+SEED="${SEED:-0}"
+EXTRA="${EXTRA:-}"
 SCRATCH_DIR="${SCRATCH_DIR:-/scratch/users/ntu/jonatha4}"
 
 export PATH="$HOME/vllm-env/bin:$PATH"
@@ -27,16 +37,16 @@ JOB="${PBS_JOBID%%.*}"
 LOGDIR=results/nscc
 mkdir -p "$LOGDIR"
 VLLM_LOG="$LOGDIR/vllm_$JOB.log"
-RUN_LOG="$LOGDIR/run_$JOB.log"
 
 echo "job $JOB on $(hostname), model $MODEL"
+echo "arms: $ARMS"
+echo "attack: ${ATTACK:-none}  injection tasks: ${INJ:-all}  user tasks: ${USER_TASKS:-all}"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
 vllm serve "$MODEL" \
   --max-model-len 16384 \
-  --max-num-seqs 16 \
+  --max-num-seqs 32 \
   --limit-mm-per-prompt '{"image":0,"video":0}' \
-  --enforce-eager \
   --gpu-memory-utilization 0.92 \
   --seed 0 \
   --reasoning-parser qwen3 \
@@ -45,7 +55,7 @@ vllm serve "$MODEL" \
 VLLM_PID=$!
 trap 'kill "$VLLM_PID" 2>/dev/null' EXIT
 
-for _ in $(seq 1 120); do
+for _ in $(seq 1 180); do
   curl -sf localhost:8000/v1/models > /dev/null && break
   if ! kill -0 "$VLLM_PID" 2>/dev/null; then
     echo "vLLM exited during startup"; tail -40 "$VLLM_LOG"; exit 1
@@ -53,22 +63,49 @@ for _ in $(seq 1 120); do
   sleep 10
 done
 if ! curl -sf localhost:8000/v1/models > /dev/null; then
-  echo "vLLM not ready after 20 minutes"; tail -40 "$VLLM_LOG"; exit 1
+  echo "vLLM not ready"; tail -40 "$VLLM_LOG"; exit 1
 fi
 echo "vLLM ready"
-env | grep ^OPENAI_
 
+# One plain request first. AgentDojo retries failures quietly, so without this
+# a broken setup looks like a hang.
 if ! .venv/bin/python -c "
-import openai, sys
+import openai
 m = openai.OpenAI().chat.completions.create(model='$MODEL', messages=[{'role':'user','content':'say ok'}], max_tokens=20)
 print('probe:', repr(m.choices[0].message.content))
 "; then
   echo "probe request failed"; tail -20 "$VLLM_LOG"; exit 1
 fi
 
-echo "running: $CMD --model $MODEL"
-.venv/bin/python $CMD --model "$MODEL" > "$RUN_LOG" 2>&1
-STATUS=$?
-tail -40 "$RUN_LOG"
-echo "exit status $STATUS, full output in $RUN_LOG"
-exit $STATUS
+PIDS=()
+NAMES=()
+for ARM in $ARMS; do
+  POLICY="${ARM%%:*}"
+  K="${ARM##*:}"
+  NAME="${POLICY}_k${K}_s${SEED}"
+  ARGS=(--model "$MODEL" --policy "$POLICY" --k "$K" --seed "$SEED" --force-rerun)
+  [ -n "$ATTACK" ] && ARGS+=(--attack "$ATTACK")
+  # shellcheck disable=SC2086
+  [ -n "$INJ" ] && ARGS+=(--injection-tasks $INJ)
+  # shellcheck disable=SC2086
+  [ -n "$USER_TASKS" ] && ARGS+=(--user-tasks $USER_TASKS)
+  # shellcheck disable=SC2086
+  [ -n "$EXTRA" ] && ARGS+=($EXTRA)
+  echo "starting $NAME"
+  .venv/bin/python scripts/run_benchmark.py "${ARGS[@]}" > "$LOGDIR/${NAME}_$JOB.log" 2>&1 &
+  PIDS+=($!)
+  NAMES+=("$NAME")
+done
+
+FAILED=0
+for i in "${!PIDS[@]}"; do
+  if wait "${PIDS[$i]}"; then
+    echo "done ${NAMES[$i]}"
+    tail -4 "$LOGDIR/${NAMES[$i]}_$JOB.log"
+  else
+    echo "FAILED ${NAMES[$i]}, see $LOGDIR/${NAMES[$i]}_$JOB.log"
+    tail -15 "$LOGDIR/${NAMES[$i]}_$JOB.log"
+    FAILED=1
+  fi
+done
+exit $FAILED
