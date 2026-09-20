@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+#   qsub -P personal-jonatha4 scripts/nscc/job.pbs
+#   qsub -P personal-jonatha4 -v CMD="scripts/run_benchmark.py --policy cascade --k 3 --force-rerun" scripts/nscc/job.pbs
+#
+#PBS -N egate
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=04:00:00
+#PBS -j oe
+
+set -uo pipefail
+cd "$PBS_O_WORKDIR" || exit 1
+
+MODEL="${MODEL:-Qwen/Qwen3.8-27B-FP8}"
+CMD="${CMD:-scripts/run_benchmark.py --policy full_approve --user-tasks user_task_0 --force-rerun}"
+SCRATCH_DIR="${SCRATCH_DIR:-/scratch/users/ntu/jonatha4}"
+
+export PATH="$HOME/vllm-env/bin:$PATH"
+export HF_HOME="$SCRATCH_DIR/hf"
+export HF_HUB_OFFLINE=1
+export VLLM_USE_FLASHINFER_SAMPLER=0
+export OPENAI_BASE_URL=http://localhost:8000/v1
+export OPENAI_API_KEY=EMPTY
+
+JOB="${PBS_JOBID%%.*}"
+LOGDIR=results/nscc
+mkdir -p "$LOGDIR"
+VLLM_LOG="$LOGDIR/vllm_$JOB.log"
+RUN_LOG="$LOGDIR/run_$JOB.log"
+
+echo "job $JOB on $(hostname), model $MODEL"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+
+vllm serve "$MODEL" \
+  --max-model-len 16384 \
+  --max-num-seqs 16 \
+  --limit-mm-per-prompt '{"image":0,"video":0}' \
+  --enforce-eager \
+  --gpu-memory-utilization 0.92 \
+  --seed 0 \
+  --reasoning-parser qwen3 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+  > "$VLLM_LOG" 2>&1 &
+VLLM_PID=$!
+trap 'kill "$VLLM_PID" 2>/dev/null' EXIT
+
+for _ in $(seq 1 120); do
+  curl -sf localhost:8000/v1/models > /dev/null && break
+  if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+    echo "vLLM exited during startup"; tail -40 "$VLLM_LOG"; exit 1
+  fi
+  sleep 10
+done
+if ! curl -sf localhost:8000/v1/models > /dev/null; then
+  echo "vLLM not ready after 20 minutes"; tail -40 "$VLLM_LOG"; exit 1
+fi
+echo "vLLM ready"
+env | grep ^OPENAI_
+
+if ! .venv/bin/python -c "
+import openai, sys
+m = openai.OpenAI().chat.completions.create(model='$MODEL', messages=[{'role':'user','content':'say ok'}], max_tokens=20)
+print('probe:', repr(m.choices[0].message.content))
+"; then
+  echo "probe request failed"; tail -20 "$VLLM_LOG"; exit 1
+fi
+
+echo "running: $CMD --model $MODEL"
+.venv/bin/python $CMD --model "$MODEL" > "$RUN_LOG" 2>&1
+STATUS=$?
+tail -40 "$RUN_LOG"
+echo "exit status $STATUS, full output in $RUN_LOG"
+exit $STATUS
