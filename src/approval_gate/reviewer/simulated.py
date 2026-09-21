@@ -27,7 +27,8 @@ def _spotlight(text: str, style: str = "sanitized") -> str:
     return f"{OPEN}\n{text.replace(OPEN, '').replace(CLOSE, '')}\n{CLOSE}"
 
 
-def _summarize_prior_actions(messages, max_chars: int = 1200, style: str = "sanitized") -> str:
+def _prior_actions(messages, style: str = "sanitized") -> str:
+    """Every tool call so far with its full output, outputs spotlighted."""
     lines: list[str] = []
     for message in messages:
         if message.get("role") == "assistant" and message.get("tool_calls"):
@@ -36,17 +37,14 @@ def _summarize_prior_actions(messages, max_chars: int = 1200, style: str = "sani
         elif message.get("role") == "tool":
             content = message.get("content")
             if isinstance(content, list):
-                content = " ".join(
+                content = "\n".join(
                     str(b.get("content", "")) for b in content if isinstance(b, dict)
                 )
-            text = str(content or "").strip().replace("\n", " ")
+            text = str(content or "").strip()
             if text:
-                lines.append(f"  -> returned: {_spotlight(text[:300], style)}")
+                lines.append(f"returned:\n{_spotlight(text, style)}")
 
-    joined = "\n".join(lines)
-    if len(joined) > max_chars:
-        joined = "...(earlier steps omitted)...\n" + joined[-max_chars:]
-    return joined or "(no prior actions)"
+    return "\n".join(lines) or "(no prior actions)"
 
 
 @dataclass
@@ -89,7 +87,7 @@ class SimulatedReviewer:
 
         user_message = USER_TEMPLATE.format(
             user_prompt=ctx.user_prompt,
-            prior_actions=_summarize_prior_actions(ctx.messages, style=self.style),
+            prior_actions=_prior_actions(ctx.messages, style=self.style),
             tool_name=ctx.tool_call.function,
             tool_args=_spotlight(str(dict(ctx.tool_call.args)), self.style),
         )
