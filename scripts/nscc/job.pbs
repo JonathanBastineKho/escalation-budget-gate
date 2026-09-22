@@ -1,13 +1,4 @@
 #!/bin/bash
-# Serves one model, then runs one or more arms against it in parallel.
-# ARMS is a space separated list of policy:k pairs.
-#
-#   smoke, one task:
-#     qsub -P personal-jonatha4 -v "USER_TASKS=user_task_0" scripts/nscc/job.pbs
-#   clean runs, all arms:
-#     qsub -P personal-jonatha4 -v "ARMS=full_approve:inf full_escalate:0 cascade:3" scripts/nscc/job.pbs
-#   attack runs:
-#     qsub -P personal-jonatha4 -v "ATTACK=important_instructions_generic,INJ=injection_task_0 injection_task_1" scripts/nscc/job.pbs
 #PBS -N egate
 #PBS -q normal
 #PBS -l select=1:ngpus=1
@@ -67,8 +58,6 @@ if ! curl -sf localhost:8000/v1/models > /dev/null; then
 fi
 echo "vLLM ready"
 
-# One plain request first. AgentDojo retries failures quietly, so without this
-# a broken setup looks like a hang.
 if ! .venv/bin/python -c "
 import openai
 m = openai.OpenAI().chat.completions.create(model='$MODEL', messages=[{'role':'user','content':'say ok'}], max_tokens=20)
@@ -81,10 +70,13 @@ PIDS=()
 NAMES=()
 for ARM in $ARMS; do
   POLICY="${ARM%%:*}"
-  K="${ARM##*:}"
-  NAME="${POLICY}_k${K}_s${SEED}"
+  REST="${ARM#*:}"
+  K="${REST%%:*}"
+  ARM_ATTACK="$ATTACK"
+  [[ "$REST" == *:* ]] && ARM_ATTACK="${REST#*:}"
+  NAME="${POLICY}_k${K}_s${SEED}${ARM_ATTACK:+_$ARM_ATTACK}"
   ARGS=(--model "$MODEL" --policy "$POLICY" --k "$K" --seed "$SEED" --force-rerun)
-  [ -n "$ATTACK" ] && ARGS+=(--attack "$ATTACK")
+  [ -n "$ARM_ATTACK" ] && ARGS+=(--attack "$ARM_ATTACK")
   # shellcheck disable=SC2086
   [ -n "$INJ" ] && ARGS+=(--injection-tasks $INJ)
   # shellcheck disable=SC2086
