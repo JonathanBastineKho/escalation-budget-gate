@@ -124,7 +124,7 @@ def main() -> None:
     if args.policy != "undefended":
         check_coverage(t.name for t in suite.tools)
         gate_model = args.gate_model or args.model
-        logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.attack or 'none'}.jsonl")
+        logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.suite}__{args.attack or 'none'}.jsonl")
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
             suite=args.suite,
