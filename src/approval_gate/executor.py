@@ -9,7 +9,13 @@ from collections.abc import Callable, Sequence
 from agentdojo.agent_pipeline import AgentPipeline, ToolsExecutor
 from agentdojo.agent_pipeline.llms.google_llm import EMPTY_FUNCTION_NAME
 from agentdojo.agent_pipeline.tool_execution import is_string_list, tool_result_to_str
-from agentdojo.functions_runtime import EmptyEnv, Env, FunctionReturnType, FunctionsRuntime
+from agentdojo.functions_runtime import (
+    EmptyEnv,
+    Env,
+    FunctionCall,
+    FunctionReturnType,
+    FunctionsRuntime,
+)
 from agentdojo.types import ChatMessage, ChatToolResultMessage, text_content_block_from_string
 
 from approval_gate.gate import ApprovalGate
@@ -23,6 +29,17 @@ def _tool_result_message(tool_call, content: str, error: str | None) -> ChatTool
         tool_call=tool_call,
         error=error,
     )
+
+
+def _has_nested_call(value) -> bool:
+    """AgentDojo can execute FunctionCall arguments outside the outer gate."""
+    if isinstance(value, FunctionCall):
+        return True
+    if isinstance(value, dict):
+        return any(_has_nested_call(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_nested_call(v) for v in value)
+    return False
 
 
 class GatedToolsExecutor(ToolsExecutor):
@@ -65,12 +82,19 @@ class GatedToolsExecutor(ToolsExecutor):
                 if isinstance(arg_v, str) and is_string_list(arg_v):
                     tool_call.args[arg_k] = literal_eval(arg_v)
 
-            outcome = self.gate.decide(tool_call, messages)
+            if _has_nested_call(tool_call.args):
+                results.append(_tool_result_message(
+                    tool_call, "", "Nested tool calls are not supported; submit separate calls."
+                ))
+                continue
+
+            outcome = self.gate.decide(tool_call, [*messages, *results])
             if not outcome.approved:
                 results.append(_tool_result_message(tool_call, "", outcome.denial_message))
                 continue
 
             result, error = runtime.run_function(env, tool_call.function, tool_call.args)
+            self.gate.policy.observe_execution(tool_call, error)
             results.append(_tool_result_message(tool_call, self.output_formatter(result), error))
 
         return query, runtime, env, [*messages, *results], extra_args

@@ -31,6 +31,7 @@ class RunMeta:
     model_agent: str
     model_gate: str
     attack_name: str | None = None
+    model_policy: str | None = None
 
 
 @dataclass
@@ -73,3 +74,6 @@ class DecisionRecord:
     tokens_in: dict = field(default_factory=dict)     # component -> tokens
     tokens_out: dict = field(default_factory=dict)
     latency_ms: float = 0.0
+    policy_node: str = "unset"      # retained even when the reviewer resolves the decision
+    policy_details: dict = field(default_factory=dict)
+    model_policy: str | None = None

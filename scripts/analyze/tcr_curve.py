@@ -29,6 +29,10 @@ STYLE = {
     "full_approve": {"color": "#2a78d6", "marker": "s", "label": "full-approve"},
     "full_escalate": {"color": "#eb6834", "marker": "o", "label": "full-escalate"},
     "cascade": {"color": "#1baf7a", "marker": "D", "label": "cascade (ours)"},
+    "task_scoped": {"color": "#8b5fbf", "marker": "^", "label": "task-scoped"},
+    "task_scoped_budget": {
+        "color": "#b35422", "marker": "v", "label": "task-scoped + budget",
+    },
 }
 INK, MUTED, GRID = "#0b0b0b", "#898781", "#e1e0d9"
 

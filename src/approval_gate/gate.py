@@ -74,11 +74,11 @@ class ApprovalGate:
             k_remaining=self.k_remaining,
         )
         decision, node = self.policy.decide(ctx)
+        policy_node = node
 
         reviewer_verdict = None
         reviewer_reason = None
-        tokens_in: dict[str, int] = {}
-        tokens_out: dict[str, int] = {}
+        tokens_in, tokens_out = self.policy.take_usage()
 
         if decision is Decision.ESCALATE:
             if not self._spend_budget():
@@ -125,6 +125,9 @@ class ApprovalGate:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=(time.perf_counter() - started) * 1000,
+            policy_node=policy_node,
+            policy_details=self.policy.decision_details(),
+            model_policy=self.meta.model_policy,
         )
         if self.logger is not None:
             self.logger.log(record)

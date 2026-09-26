@@ -19,6 +19,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--gate-model", default=None)
+    parser.add_argument("--policy-model", default=None)
     parser.add_argument("--suite", default="banking")
     parser.add_argument("--policies", nargs="+", default=["full_approve", "full_escalate"])
     parser.add_argument("--ks", nargs="+", default=["0", "1", "2", "3", "5", "8", "inf"])
@@ -45,6 +46,8 @@ def main() -> None:
                 ]
                 if args.gate_model:
                     cmd += ["--gate-model", args.gate_model]
+                if args.policy_model:
+                    cmd += ["--policy-model", args.policy_model]
                 if args.attack and args.attack != "none":
                     cmd += ["--attack", args.attack]
                 if args.user_tasks:

@@ -10,6 +10,8 @@ the decision log appends, so a resumed run splits across two run_ids.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import uuid
 from pathlib import Path
 
@@ -37,10 +39,11 @@ from approval_gate.decisions import RunMeta
 from approval_gate.executor import GatedAgentPipeline, GatedToolsExecutor
 from approval_gate.gate import ApprovalGate
 from approval_gate.llm import build_client, build_llm, pipeline_name
-from approval_gate.nodes.allowlist import check_coverage
+from approval_gate.nodes.allowlist import Tier, check_coverage, classify
 from approval_gate.policies.cascade import CascadePolicy
 from approval_gate.policies.full_approve import FullApprovePolicy
 from approval_gate.policies.full_escalate import FullEscalatePolicy
+from approval_gate.policies.task_scoped import EXTRACTION_SYSTEM, ScopeExtractor, TaskScopedPolicy
 from approval_gate.reviewer.simulated import SimulatedReviewer
 from approval_gate.telemetry.logger import DecisionLogger
 
@@ -49,6 +52,8 @@ POLICIES = {
     "full_approve": FullApprovePolicy,
     "full_escalate": FullEscalatePolicy,
     "cascade": CascadePolicy,
+    "task_scoped": TaskScopedPolicy,
+    "task_scoped_budget": TaskScopedPolicy,
 }
 
 # AgentDojo's prompt plus one line: nothing answers the agent's questions, and
@@ -77,6 +82,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--suite", default="banking")
+    parser.add_argument(
+        "--policy-model", default=None,
+        help="task-scope extractor model; defaults to --gate-model or --model",
+    )
     parser.add_argument(
         "--policy",
         default="undefended",
@@ -116,6 +125,8 @@ def main() -> None:
     if args.attack is not None and args.attack not in ATTACKS:
         parser.error(f"unknown attack {args.attack!r}; registered: {sorted(ATTACKS)}")
     k = None if args.k == "inf" else int(args.k)
+    if k is not None and k < 0:
+        parser.error("--k must be nonnegative or 'inf'")
     suite = get_suite(BENCHMARK_VERSION, args.suite)
     name = pipeline_name(args.model, args.policy, k, args.seed)
 
@@ -124,6 +135,26 @@ def main() -> None:
     if args.policy != "undefended":
         check_coverage(t.name for t in suite.tools)
         gate_model = args.gate_model or args.model
+        policy_model = args.policy_model or gate_model
+        if args.policy in {"task_scoped", "task_scoped_budget"}:
+            schemas = {
+                t.name: t.parameters.model_json_schema()
+                for t in suite.tools if classify(t.name).tier is not Tier.READ_ONLY
+            }
+            policy = TaskScopedPolicy(
+                ScopeExtractor(build_client(args.seed), policy_model, schemas),
+                budget_aware=args.policy == "task_scoped_budget",
+            )
+            # Keep policy/reviewer changes out of the same AgentDojo result cache.
+            config = json.dumps({
+                "version": "task-scoped-v1", "policy_model": policy_model,
+                "reviewer_model": gate_model, "schemas": schemas,
+                "extractor_prompt": EXTRACTION_SYSTEM,
+            }, sort_keys=True)
+            tag = hashlib.sha256(config.encode()).hexdigest()[:10]
+            name = pipeline_name(f"{args.model}-scope{tag}", args.policy, k, args.seed)
+        else:
+            policy = POLICIES[args.policy]()
         logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.attack or 'none'}.jsonl")
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
@@ -134,9 +165,10 @@ def main() -> None:
             model_agent=args.model,
             model_gate=gate_model,
             attack_name=args.attack,
+            model_policy=policy_model if args.policy.startswith("task_scoped") else None,
         )
         gate = ApprovalGate(
-            policy=POLICIES[args.policy](),
+            policy=policy,
             meta=meta,
             logger=logger,
             reviewer=SimulatedReviewer(build_client(args.seed), gate_model),

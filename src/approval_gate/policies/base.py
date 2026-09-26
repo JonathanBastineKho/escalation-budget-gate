@@ -30,6 +30,17 @@ class Policy(abc.ABC):
     def start_task(self, task_id: str, user_prompt: str) -> None:
         """Reset any per-task state."""
 
+    def observe_execution(self, tool_call: FunctionCall, error: str | None) -> None:
+        """Observe actual tool completion, not just approval. Default: no state."""
+
+    def take_usage(self) -> tuple[dict, dict]:
+        """Drain policy inference token counts for this decision."""
+        return {}, {}
+
+    def decision_details(self) -> dict:
+        """Policy-specific audit information without benchmark ground truth."""
+        return {}
+
     @abc.abstractmethod
     def decide(self, ctx: CallContext) -> tuple[Decision, str]:
         """Return (decision, name of the node that decided)."""
