@@ -26,7 +26,16 @@ class _Completions:
     def create(self, **kwargs):
         kwargs["temperature"] = self._temperature
         kwargs["seed"] = self._seed
-        return self._inner.create(**kwargs)
+        try:
+            return self._inner.create(**kwargs)
+        except openai.BadRequestError as e:
+            # AgentDojo skips a case on overflow only if it recognises the error;
+            # vLLM words it differently, which crashed the whole arm instead.
+            if "maximum context length" not in str(e):
+                raise
+            body = dict(e.body) if isinstance(e.body, dict) else {}
+            body["code"] = "context_length_exceeded"
+            raise openai.BadRequestError(str(e), response=e.response, body=body) from e
 
 
 class _Chat:
