@@ -35,9 +35,9 @@ from dotenv import load_dotenv
 
 import approval_gate.attacks  # noqa: F401  (registers important_instructions_generic)
 from approval_gate.decisions import RunMeta
-from approval_gate.executor import GatedAgentPipeline, GatedToolsExecutor
+from approval_gate.executor import GatedAgentPipeline, GatedToolsExecutor, track_cases
 from approval_gate.gate import ApprovalGate
-from approval_gate.llm import build_client, build_llm, pipeline_name
+from approval_gate.llm import UsageMeter, build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import check_coverage
 from approval_gate.nodes.envelope import EnvelopeExtractor
 from approval_gate.policies.cascade import CascadePolicy
@@ -63,9 +63,15 @@ NEEDS_ENVELOPE = {"cascade", "static_threshold"}
 BASE_SYSTEM_MESSAGE = load_system_message(None).rstrip("\n") + "\n  - Do not ask the user questions.\n"
 
 
-def build_pipeline(model: str, gate: ApprovalGate | None, name: str, seed: int = 0) -> AgentPipeline:
+def build_pipeline(
+    model: str,
+    gate: ApprovalGate | None,
+    name: str,
+    seed: int = 0,
+    agent_meter: UsageMeter | None = None,
+) -> AgentPipeline:
     """gate=None builds stock AgentDojo; otherwise only the executor differs."""
-    llm = build_llm(model, seed=seed)
+    llm = build_llm(model, seed=seed, meter=agent_meter)
 
     if gate is None:
         tools_loop = ToolsExecutionLoop([ToolsExecutor(), llm])
@@ -109,7 +115,11 @@ def main() -> None:
         help="omit for a clean (utility) run; 'important_instructions_generic' for the "
              "injection runs behind the TCR@k curve",
     )
-    parser.add_argument("--logdir", default="results/runs")
+    parser.add_argument(
+        "--logdir",
+        default="results/runs",
+        help="AgentDojo run logs; decisions/ and cases/ are written next to it",
+    )
     parser.add_argument("--user-tasks", nargs="*", default=None)
     parser.add_argument(
         "--injection-tasks",
@@ -129,11 +139,19 @@ def main() -> None:
 
     gate = None
     logger = None
+    agent_meter = None
     if args.policy != "undefended":
         check_coverage(t.name for t in suite.tools)
         gate_model = args.model
         reviewer_model = args.reviewer_model or args.model
-        logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.suite}__{args.attack or 'none'}.jsonl")
+        agent_meter = UsageMeter()
+        # runs/, decisions/ and cases/ stay side by side, e.g. under results/share/<model>/.
+        out_root = Path(args.logdir).parent
+        log_name = f"{name}__{args.suite}__{args.attack or 'none'}.jsonl"
+        logger = DecisionLogger(
+            out_root / "decisions" / log_name,
+            cases_path=out_root / "cases" / log_name,
+        )
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
             suite=args.suite,
@@ -159,11 +177,12 @@ def main() -> None:
                 build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL")),
                 reviewer_model,
             ),
-            # The gate only receives the prompt, so map it back to the task id.
-            prompt_to_task_id={t.PROMPT: t.ID for t in suite.user_tasks.values()},
+            agent_meter=agent_meter,
         )
+        # Gives the gate each case's ids and outcome for the logs.
+        track_cases(suite, gate)
 
-    pipeline = build_pipeline(args.model, gate, name, seed=args.seed)
+    pipeline = build_pipeline(args.model, gate, name, seed=args.seed, agent_meter=agent_meter)
     logdir = Path(args.logdir)
     header = f"\nsuite={args.suite} model={args.model} policy={args.policy} k={args.k} seed={args.seed}"
 

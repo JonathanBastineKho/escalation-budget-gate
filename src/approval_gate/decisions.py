@@ -40,6 +40,7 @@ class DecisionRecord:
 
     run_id: str
     task_id: str
+    injection_task_id: str | None   # None on clean runs
     suite: str
     policy: str
     k_budget: int | None
@@ -51,6 +52,7 @@ class DecisionRecord:
     step_index: int
 
     tool_name: str
+    tool_call_id: str | None = None  # matches tool_calls[].id in the AgentDojo run log
     tool_tier: str = "unknown"
     args_hash: str = ""
     critical_args: dict = field(default_factory=dict)
@@ -73,6 +75,32 @@ class DecisionRecord:
     rolled_back: bool = False
     executed: bool = True           # final outcome after an escalation resolves
 
-    tokens_in: dict = field(default_factory=dict)     # component -> tokens
+    # component -> tokens. "agent" is the model turn that proposed this call,
+    # counted on the first call of that turn only, so sums stay correct.
+    tokens_in: dict = field(default_factory=dict)
     tokens_out: dict = field(default_factory=dict)
     latency_ms: float = 0.0
+
+
+@dataclass
+class CaseRecord:
+    """One record per (user task, injection task) case, written when the case
+    ends. Holds totals the per-call records can't: the agent's final answer
+    turn has no tool call, so its tokens only appear here."""
+
+    run_id: str
+    task_id: str
+    injection_task_id: str | None
+    suite: str
+    policy: str
+    k_budget: int | None
+    seed: int
+    attack_name: str | None
+    attempts: int                  # pipeline.query() calls; >1 means AgentDojo retried
+    gated_calls: int
+    escalations: int               # calls the reviewer actually saw
+    utility: bool | None           # None if the case raised
+    security: bool | None          # None on clean runs, where AgentDojo's value is a placeholder
+    error: str | None
+    tokens_in: dict
+    tokens_out: dict
