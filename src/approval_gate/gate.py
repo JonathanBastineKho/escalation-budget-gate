@@ -98,6 +98,12 @@ class ApprovalGate:
         else:
             approved = decision is Decision.AUTO_APPROVE
 
+        self.policy.observe(ctx, approved, node)
+        for component, n in ctx.features.pop("tokens_in", {}).items():
+            tokens_in[component] = tokens_in.get(component, 0) + n
+        for component, n in ctx.features.pop("tokens_out", {}).items():
+            tokens_out[component] = tokens_out.get(component, 0) + n
+
         # Logged for every policy, so baselines can be grouped by tier too.
         tool_info = classify(tool_call.function)
         record = DecisionRecord(
@@ -127,6 +133,9 @@ class ApprovalGate:
             tokens_out=tokens_out,
             latency_ms=(time.perf_counter() - started) * 1000,
         )
+        for key, value in ctx.features.items():
+            if hasattr(record, key):
+                setattr(record, key, value)
         if self.logger is not None:
             self.logger.log(record)
 

@@ -63,6 +63,7 @@ class DecisionRecord:
 
     tau_low: float = 0.0
     tau_deny: float = 1.0
+    tau_esc: float = 0.0
     k_remaining_before: int | None = None
     decision: str = Decision.AUTO_APPROVE
     decided_by_node: str = "unset"

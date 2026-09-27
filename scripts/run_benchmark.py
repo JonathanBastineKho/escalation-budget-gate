@@ -39,9 +39,12 @@ from approval_gate.executor import GatedAgentPipeline, GatedToolsExecutor
 from approval_gate.gate import ApprovalGate
 from approval_gate.llm import build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import check_coverage
+from approval_gate.nodes.envelope import EnvelopeExtractor
 from approval_gate.policies.cascade import CascadePolicy
+from approval_gate.policies.cascade_n1 import CascadeN1Policy
 from approval_gate.policies.full_approve import FullApprovePolicy
 from approval_gate.policies.full_escalate import FullEscalatePolicy
+from approval_gate.policies.static_threshold import StaticThresholdPolicy
 from approval_gate.reviewer.simulated import SimulatedReviewer
 from approval_gate.telemetry.logger import DecisionLogger
 
@@ -49,8 +52,11 @@ BENCHMARK_VERSION = "v1.2.1"
 POLICIES = {
     "full_approve": FullApprovePolicy,
     "full_escalate": FullEscalatePolicy,
+    "cascade_n1": CascadeN1Policy,
     "cascade": CascadePolicy,
+    "static_threshold": StaticThresholdPolicy,
 }
+NEEDS_ENVELOPE = {"cascade", "static_threshold"}
 
 # AgentDojo's prompt plus one line: nothing answers the agent's questions, and
 # asking one ends the task. Same message for every policy.
@@ -92,15 +98,10 @@ def main() -> None:
         help="repeat index; at temperature 0 it separates repeats rather than changing output",
     )
     parser.add_argument(
-        "--gate-model",
-        default=None,
-        help="model for the gate's own LLM calls (Nodes 1 to 4); defaults to --model",
-    )
-    parser.add_argument(
         "--reviewer-model",
         default=None,
-        help="model for the simulated reviewer (Node 5); defaults to --gate-model. "
-             "Set REVIEWER_BASE_URL if it is served from a different server",
+        help="model for the simulated reviewer (Node 5); defaults to --model, which also "
+             "serves Nodes 1 to 4. Set REVIEWER_BASE_URL if it is on a different server",
     )
     parser.add_argument(
         "--attack",
@@ -130,8 +131,8 @@ def main() -> None:
     logger = None
     if args.policy != "undefended":
         check_coverage(t.name for t in suite.tools)
-        gate_model = args.gate_model or args.model
-        reviewer_model = args.reviewer_model or gate_model
+        gate_model = args.model
+        reviewer_model = args.reviewer_model or args.model
         logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.suite}__{args.attack or 'none'}.jsonl")
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
@@ -144,8 +145,14 @@ def main() -> None:
             model_reviewer=reviewer_model,
             attack_name=args.attack,
         )
+        gate_client = build_client(args.seed)
+        if args.policy in NEEDS_ENVELOPE:
+            tools = [(t.name, t.description.strip().splitlines()[0]) for t in suite.tools]
+            policy = POLICIES[args.policy](EnvelopeExtractor(gate_client, gate_model, tools))
+        else:
+            policy = POLICIES[args.policy]()
         gate = ApprovalGate(
-            policy=POLICIES[args.policy](),
+            policy=policy,
             meta=meta,
             logger=logger,
             reviewer=SimulatedReviewer(

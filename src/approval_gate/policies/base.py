@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agentdojo.functions_runtime import FunctionCall
@@ -22,6 +22,7 @@ class CallContext:
     messages: Any               # Sequence[ChatMessage] so far
     step_index: int
     k_remaining: int | None     # None means unbounded
+    features: dict = field(default_factory=dict)   # policy -> log record
 
 
 class Policy(abc.ABC):
@@ -33,3 +34,6 @@ class Policy(abc.ABC):
     @abc.abstractmethod
     def decide(self, ctx: CallContext) -> tuple[Decision, str]:
         """Return (decision, name of the node that decided)."""
+
+    def observe(self, ctx: CallContext, approved: bool, decided_by: str) -> None:
+        """Told the final outcome, after any escalation has been resolved."""
