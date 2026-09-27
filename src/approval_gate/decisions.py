@@ -26,7 +26,7 @@ class RunMeta:
     run_id: str
     suite: str
     policy: str
-    k_budget: int | None          # None means unbounded
+    k_budget: int | None  # None means unbounded
     seed: int
     model_agent: str
     model_gate: str
@@ -49,15 +49,21 @@ class DecisionRecord:
     step_index: int
 
     tool_name: str
+    call_id: str = ""
+    approved: bool = False
+    reviewer_parse_failed: bool = False
+    packet: dict = field(default_factory=dict)
+    features: dict = field(default_factory=dict)
+    policy_details: dict = field(default_factory=dict)
     tool_tier: str = "unknown"
     args_hash: str = ""
     critical_args: dict = field(default_factory=dict)
 
     taint_flags: dict = field(default_factory=dict)
     envelope_deviation: float = 0.0
-    risk_R: float = 0.0
+    risk_R: float | None = None
     harm_H: float = 0.0
-    voi: float = 0.0
+    voi: float | None = None
 
     tau_low: float = 0.0
     tau_deny: float = 1.0
@@ -68,8 +74,8 @@ class DecisionRecord:
     reviewer_reason: str | None = None
     speculative_used: bool = False
     rolled_back: bool = False
-    executed: bool = True           # final outcome after an escalation resolves
+    executed: bool = False  # actual invocation; execution events are authoritative
 
-    tokens_in: dict = field(default_factory=dict)     # component -> tokens
+    tokens_in: dict = field(default_factory=dict)  # component -> tokens
     tokens_out: dict = field(default_factory=dict)
     latency_ms: float = 0.0

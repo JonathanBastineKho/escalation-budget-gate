@@ -11,6 +11,7 @@ from agentdojo.functions_runtime import FunctionCall
 from approval_gate.decisions import Decision, DecisionRecord, RunMeta, hash_args
 from approval_gate.nodes.allowlist import classify
 from approval_gate.policies.base import CallContext, Policy
+from approval_gate.reviewer.context import review_packet
 
 GENERIC_DENIAL = "Tool call denied by approval policy."
 
@@ -32,6 +33,8 @@ class ApprovalGate:
         denial_style: str = "generic",
         prompt_to_task_id: dict[str, str] | None = None,
     ) -> None:
+        if meta.k_budget is not None and meta.k_budget < 0:
+            raise ValueError("k must be nonnegative")
         self.policy = policy
         self.meta = meta
         self.logger = logger
@@ -43,14 +46,20 @@ class ApprovalGate:
         self.user_prompt = ""
         self.k_remaining: int | None = meta.k_budget
         self.step_index = 0
+        self.records = []
+        self.executions = []
+        self.force_decision = None
 
-    def start_task(self, user_prompt: str) -> None:
+    def start_task(self, user_prompt: str, task_id: str | None = None) -> None:
         """Resets per-task state so budget and cached decisions never carry
         over between tasks."""
         self.user_prompt = user_prompt
-        self.task_id = self.prompt_to_task_id.get(user_prompt, "unknown")
+        self.task_id = task_id or self.prompt_to_task_id.get(user_prompt, "unknown")
         self.k_remaining = self.meta.k_budget
         self.step_index = 0
+        self.records = []
+        self.executions = []
+        self.force_decision = None
         self.policy.start_task(self.task_id, user_prompt)
 
     def _spend_budget(self) -> bool:
@@ -61,7 +70,7 @@ class ApprovalGate:
         self.k_remaining -= 1
         return True
 
-    def decide(self, tool_call: FunctionCall, messages) -> GateOutcome:
+    def decide(self, tool_call: FunctionCall, messages, tool_schema=None) -> GateOutcome:
         started = time.perf_counter()
         k_before = self.k_remaining
 
@@ -72,13 +81,19 @@ class ApprovalGate:
             messages=messages,
             step_index=self.step_index,
             k_remaining=self.k_remaining,
+            tool_schema=tool_schema or {},
         )
-        decision, node = self.policy.decide(ctx)
+        if self.force_decision is not None:
+            decision, node = self.force_decision, "counterfactual_override"
+            self.force_decision = None
+        else:
+            decision, node = self.policy.decide(ctx)
 
         reviewer_verdict = None
         reviewer_reason = None
-        tokens_in: dict[str, int] = {}
-        tokens_out: dict[str, int] = {}
+        parse_failed = False
+        tokens_in: dict[str, int | None] = {}
+        tokens_out: dict[str, int | None] = {}
 
         if decision is Decision.ESCALATE:
             if not self._spend_budget():
@@ -88,9 +103,17 @@ class ApprovalGate:
             elif self.reviewer is None:
                 raise RuntimeError("policy escalated but no reviewer is configured")
             else:
+                if hasattr(self.logger, "emit"):
+                    self.logger.emit(
+                        "reviews",
+                        step_index=self.step_index,
+                        call_id=tool_call.id,
+                        event="consumed",
+                    )
                 result = self.reviewer.review(ctx)
                 reviewer_verdict = result.verdict
                 reviewer_reason = result.reason
+                parse_failed = result.parse_failed
                 approved = result.verdict == "APPROVE"
                 node = "reviewer"
                 tokens_in["reviewer"] = result.tokens_in
@@ -112,6 +135,14 @@ class ApprovalGate:
             attack_name=self.meta.attack_name,
             step_index=self.step_index,
             tool_name=tool_call.function,
+            call_id=tool_call.id or str(self.step_index),
+            approved=approved,
+            reviewer_parse_failed=parse_failed,
+            packet=review_packet(ctx),
+            features=getattr(self.policy, "last_details", {}).get("features", {}),
+            policy_details=getattr(self.policy, "last_details", {}),
+            risk_R=getattr(self.policy, "last_details", {}).get("risk"),
+            voi=getattr(self.policy, "last_details", {}).get("voi"),
             tool_tier=str(tool_info.tier),
             harm_H=tool_info.harm,
             args_hash=hash_args(dict(tool_call.args)),
@@ -121,13 +152,14 @@ class ApprovalGate:
             decided_by_node=node,
             reviewer_verdict=reviewer_verdict,
             reviewer_reason=reviewer_reason,
-            executed=approved,
+            executed=False,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=(time.perf_counter() - started) * 1000,
         )
         if self.logger is not None:
             self.logger.log(record)
+        self.records.append(record)
 
         self.step_index += 1
         return GateOutcome(

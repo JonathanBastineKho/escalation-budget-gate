@@ -1,0 +1,36 @@
+# Frozen policies with a smaller reviewer; no retraining.
+splits: experiments/splits.json
+models:
+  model: qwen3.8:27b
+  gate_model: qwen3.5:9b
+  policy_model: qwen3.5:9b
+settings:
+  temperature: 0
+  max_tokens: 4096
+  max_iters: 15
+  attempts: 2
+  timeout: 300
+  server_context_length: 16384
+  reasoning_effort: none
+  phase: diagnostic
+budgets:
+- 1
+- 3
+seeds:
+- 0
+split: validation
+attacks:
+- none
+- direct
+- important_instructions_generic
+strategies:
+- policy: full_approve
+- policy: full_escalate
+- policy: cascade
+- policy: llm_judge
+- policy: learned_risk
+  checkpoint: results/checkpoints/risk.json
+- policy: learned_voi
+  checkpoint: results/checkpoints/voi_ad.json
+output: results/reviewer_sensitivity
+tasks_per_suite: 2

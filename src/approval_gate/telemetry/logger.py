@@ -23,23 +23,25 @@ class DecisionLogger:
 
     def log(self, record: DecisionRecord) -> None:
         self._fh.write(json.dumps(asdict(record)) + "\n")
-        self._fh.flush()   # keep records if the run crashes
+        self._fh.flush()  # keep records if the run crashes
         self.decisions[record.decision] += 1
         if record.decided_by_node == "reviewer":
             self.escalations_used += 1
-        if not record.executed:
+        if not record.approved:
             self.denied += 1
-        self.tokens_in.update(record.tokens_in)
-        self.tokens_out.update(record.tokens_out)
+        self.tokens_in.update({k: v for k, v in record.tokens_in.items() if v is not None})
+        self.tokens_out.update({k: v for k, v in record.tokens_out.items() if v is not None})
 
     def summary(self) -> str:
         total = sum(self.decisions.values())
         parts = [f"{d}={n}" for d, n in sorted(self.decisions.items())]
         tokens = "  ".join(
-            f"{c}_tokens={self.tokens_in[c]}in/{self.tokens_out[c]}out" for c in sorted(self.tokens_in)
+            f"{c}_tokens={self.tokens_in[c]}in/{self.tokens_out[c]}out"
+            for c in sorted(self.tokens_in)
         )
         return (
-            f"{total} calls gated  |  " + "  ".join(parts)
+            f"{total} calls gated  |  "
+            + "  ".join(parts)
             + f"  |  escalations={self.escalations_used}  denied={self.denied}"
             + (f"  |  {tokens}" if tokens else "")
         )

@@ -1,0 +1,50 @@
+# Match training/checkpoint targets before running.
+splits: experiments/splits.json
+models:
+  model: qwen3.8:27b
+  gate_model: qwen3.8:27b
+  policy_model: qwen3.5:9b
+settings:
+  temperature: 0
+  max_tokens: 4096
+  max_iters: 15
+  attempts: 2
+  timeout: 300
+  server_context_length: 16384
+  reasoning_effort: none
+  phase: diagnostic
+budgets:
+- 1
+- 3
+seeds:
+- 0
+split: validation
+attacks:
+- none
+- direct
+- important_instructions_generic
+strategies:
+- policy: learned_risk
+  checkpoint: results/checkpoints/risk.json
+- policy: learned_voi
+  checkpoint: results/checkpoints/voi_ad.json
+- policy: learned_risk
+  ablation: no_budget
+  checkpoint: results/checkpoints/risk_no_budget.json
+- policy: learned_voi
+  ablation: no_budget
+  checkpoint: results/checkpoints/voi_no_budget.json
+- policy: learned_risk
+  ablation: no_provenance
+  checkpoint: results/checkpoints/risk_no_provenance.json
+- policy: learned_voi
+  ablation: no_provenance
+  checkpoint: results/checkpoints/voi_no_provenance.json
+- policy: learned_risk
+  ablation: tool_only
+  checkpoint: results/checkpoints/risk_tool_only.json
+- policy: learned_voi
+  ablation: tool_only
+  checkpoint: results/checkpoints/voi_tool_only.json
+output: results/ablations
+tasks_per_suite: 2

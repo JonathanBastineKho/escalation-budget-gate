@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agentdojo.functions_runtime import FunctionCall
@@ -19,9 +19,10 @@ class CallContext:
     task_id: str
     user_prompt: str
     tool_call: FunctionCall
-    messages: Any               # Sequence[ChatMessage] so far
+    messages: Any  # Sequence[ChatMessage] so far
     step_index: int
-    k_remaining: int | None     # None means unbounded
+    k_remaining: int | None  # None means unbounded
+    tool_schema: dict = field(default_factory=dict)
 
 
 class Policy(abc.ABC):

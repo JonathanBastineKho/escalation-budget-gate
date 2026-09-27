@@ -10,8 +10,11 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+from approval_gate.experiments import cases_for
+from approval_gate.notifications import ProgressNotifier, add_notification_options
 
-K_INDEPENDENT = {"full_approve", "undefended"}
+K_INDEPENDENT = {"full_approve", "undefended", "melon_local"}
 RUNNER = Path(__file__).with_name("run_benchmark.py")
 
 
@@ -27,6 +30,7 @@ def main() -> None:
     parser.add_argument("--user-tasks", nargs="*", default=None)
     parser.add_argument("--injection-tasks", nargs="*", default=None)
     parser.add_argument("--dry-run", action="store_true", help="print the plan and stop")
+    add_notification_options(parser)
     args = parser.parse_args()
 
     cells: list[list[str]] = []
@@ -35,13 +39,19 @@ def main() -> None:
         for k in ks:
             for seed in args.seeds:
                 cmd = [
-                    sys.executable, str(RUNNER),
-                    "--model", args.model,
-                    "--suite", args.suite,
-                    "--policy", policy,
-                    "--k", k,
-                    "--seed", str(seed),
-                    "--force-rerun",
+                    sys.executable,
+                    str(RUNNER),
+                    "--no-notify",
+                    "--model",
+                    args.model,
+                    "--suite",
+                    args.suite,
+                    "--policy",
+                    policy,
+                    "--k",
+                    k,
+                    "--seed",
+                    str(seed),
                 ]
                 if args.gate_model:
                     cmd += ["--gate-model", args.gate_model]
@@ -61,13 +71,28 @@ def main() -> None:
     if args.dry_run:
         return
 
+    load_dotenv()
+    per_cell = len(cases_for(args.suite, args.user_tasks, args.attack, args.injection_tasks))
     failed = []
-    for i, cmd in enumerate(cells, 1):
-        print(f"\n===== run {i}/{len(cells)} =====", flush=True)
-        # check=False: one failed cell is recorded and the sweep carries on.
-        if subprocess.run(cmd, check=False).returncode != 0:
-            failed.append(i)
-    print(f"\ndone: {len(cells) - len(failed)}/{len(cells)} succeeded" + (f", failed: {failed}" if failed else ""))
+    with ProgressNotifier(
+        f"Sweep: {args.suite}",
+        len(cells),
+        estimated_seconds_per_item=180 * per_cell,
+        enabled=args.notify,
+        output="results/experiments",
+    ) as progress:
+        for i, cmd in enumerate(cells, 1):
+            print(f"\n===== run {i}/{len(cells)} =====", flush=True)
+            # check=False: one failed cell is recorded and the sweep carries on.
+            if subprocess.run(cmd, check=False).returncode != 0:
+                failed.append(i)
+            progress.update(i, failed=len(failed))
+    print(
+        f"\ndone: {len(cells) - len(failed)}/{len(cells)} succeeded"
+        + (f", failed: {failed}" if failed else "")
+    )
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

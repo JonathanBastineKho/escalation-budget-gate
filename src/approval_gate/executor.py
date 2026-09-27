@@ -4,6 +4,7 @@ before running each tool call."""
 from __future__ import annotations
 
 from ast import literal_eval
+from copy import deepcopy
 from collections.abc import Callable, Sequence
 
 from agentdojo.agent_pipeline import AgentPipeline, ToolsExecutor
@@ -30,9 +31,11 @@ class GatedToolsExecutor(ToolsExecutor):
         self,
         gate: ApprovalGate,
         tool_output_formatter: Callable[[FunctionReturnType], str] = tool_result_to_str,
+        observer=None,
     ) -> None:
         super().__init__(tool_output_formatter)
         self.gate = gate
+        self.observer = observer
 
     def query(
         self,
@@ -42,21 +45,32 @@ class GatedToolsExecutor(ToolsExecutor):
         messages: Sequence[ChatMessage] = [],
         extra_args: dict = {},
     ):
-        if len(messages) == 0 or messages[-1]["role"] != "assistant":
-            return query, runtime, env, messages, extra_args
-        if not messages[-1]["tool_calls"]:
+        pending = extra_args.get("pending_calls")
+        if pending is None:
+            if len(messages) == 0 or messages[-1]["role"] != "assistant":
+                return query, runtime, env, messages, extra_args
+            pending = messages[-1].get("tool_calls") or []
+        if not pending:
             return query, runtime, env, messages, extra_args
 
         results = []
-        for tool_call in messages[-1]["tool_calls"]:
+        for call_index, tool_call in enumerate(pending):
             # Malformed calls skip the gate so they never cost budget.
             if tool_call.function == EMPTY_FUNCTION_NAME:
-                results.append(_tool_result_message(
-                    tool_call, "", "Empty function name provided. Provide a valid function name."))
+                results.append(
+                    _tool_result_message(
+                        tool_call,
+                        "",
+                        "Empty function name provided. Provide a valid function name.",
+                    )
+                )
                 continue
             if tool_call.function not in (t.name for t in runtime.functions.values()):
-                results.append(_tool_result_message(
-                    tool_call, "", f"Invalid tool {tool_call.function} provided."))
+                results.append(
+                    _tool_result_message(
+                        tool_call, "", f"Invalid tool {tool_call.function} provided."
+                    )
+                )
                 continue
 
             # Same coercion as ToolsExecutor; done before the gate so it always
@@ -65,12 +79,54 @@ class GatedToolsExecutor(ToolsExecutor):
                 if isinstance(arg_v, str) and is_string_list(arg_v):
                     tool_call.args[arg_k] = literal_eval(arg_v)
 
-            outcome = self.gate.decide(tool_call, messages)
+            function = next(t for t in runtime.functions.values() if t.name == tool_call.function)
+            visible_messages = [*messages, *results]
+            outcome = self.gate.decide(
+                tool_call,
+                visible_messages,
+                {
+                    "name": function.name,
+                    "description": getattr(function, "description", ""),
+                    "parameters": function.parameters.model_json_schema(),
+                },
+            )
+            if self.observer:
+                self.observer(
+                    env.model_copy(deep=True),
+                    deepcopy(visible_messages),
+                    deepcopy(pending[call_index:]),
+                    outcome.record,
+                )
             if not outcome.approved:
                 results.append(_tool_result_message(tool_call, "", outcome.denial_message))
                 continue
 
-            result, error = runtime.run_function(env, tool_call.function, tool_call.args)
+            event = dict(
+                step_index=outcome.record.step_index,
+                call_id=outcome.record.call_id,
+                tool_name=tool_call.function,
+                arguments=dict(tool_call.args),
+            )
+            outcome.record.executed = True
+            self.gate.executions.append(deepcopy(tool_call))
+            if hasattr(self.gate.logger, "emit"):
+                self.gate.logger.emit("executions", event="started", **event)
+            try:
+                result, error = runtime.run_function(env, tool_call.function, tool_call.args)
+            except Exception as exc:
+                if hasattr(self.gate.logger, "emit"):
+                    self.gate.logger.emit(
+                        "executions",
+                        event="finished",
+                        success=False,
+                        error_type=type(exc).__name__,
+                        **event,
+                    )
+                raise
+            if hasattr(self.gate.logger, "emit"):
+                self.gate.logger.emit(
+                    "executions", event="finished", success=error is None, error=error, **event
+                )
             results.append(_tool_result_message(tool_call, self.output_formatter(result), error))
 
         return query, runtime, env, [*messages, *results], extra_args
