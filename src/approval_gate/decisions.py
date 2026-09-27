@@ -77,3 +77,6 @@ class DecisionRecord:
     policy_node: str = "unset"      # retained even when the reviewer resolves the decision
     policy_details: dict = field(default_factory=dict)
     model_policy: str | None = None
+    reviewer_mode: str | None = None
+    reviewer_parse_failed: bool = False
+    reviewer_assessment: dict = field(default_factory=dict)

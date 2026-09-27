@@ -44,7 +44,8 @@ from approval_gate.policies.cascade import CascadePolicy
 from approval_gate.policies.full_approve import FullApprovePolicy
 from approval_gate.policies.full_escalate import FullEscalatePolicy
 from approval_gate.policies.task_scoped import EXTRACTION_SYSTEM, ScopeExtractor, TaskScopedPolicy
-from approval_gate.reviewer.simulated import SimulatedReviewer
+from approval_gate.reviewer.prompts import TASK_SCOPED_SYSTEM, TASK_SCOPED_TEMPLATE
+from approval_gate.reviewer.simulated import REVIEWER_MODES, SimulatedReviewer
 from approval_gate.telemetry.logger import DecisionLogger
 
 BENCHMARK_VERSION = "v1.2.1"
@@ -82,6 +83,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--suite", default="banking")
+    parser.add_argument("--reviewer-mode", choices=REVIEWER_MODES, default="task_scoped",
+                        help="task_scoped uses delegated authorization; legacy reproduces old review")
     parser.add_argument(
         "--policy-model", default=None,
         help="task-scope extractor model; defaults to --gate-model or --model",
@@ -155,6 +158,15 @@ def main() -> None:
             name = pipeline_name(f"{args.model}-scope{tag}", args.policy, k, args.seed)
         else:
             policy = POLICIES[args.policy]()
+        if args.reviewer_mode != "legacy":
+            review_config = json.dumps({
+                "version": "review-scope-v1", "mode": args.reviewer_mode,
+                "model": gate_model, "system": TASK_SCOPED_SYSTEM,
+                "template": TASK_SCOPED_TEMPLATE,
+            }, sort_keys=True)
+            review_tag = hashlib.sha256(review_config.encode()).hexdigest()[:10]
+            # Prefix keeps the existing policy/k/seed suffix readable by analysis.
+            name = f"review{review_tag}-{name}"
         logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.attack or 'none'}.jsonl")
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
@@ -171,7 +183,11 @@ def main() -> None:
             policy=policy,
             meta=meta,
             logger=logger,
-            reviewer=SimulatedReviewer(build_client(args.seed), gate_model),
+            reviewer=SimulatedReviewer(
+                build_client(args.seed), gate_model, mode=args.reviewer_mode,
+                tool_schemas={t.name: {**t.parameters.model_json_schema(),
+                                      "description": t.description} for t in suite.tools},
+            ),
             # The gate only receives the prompt, so map it back to the task id.
             prompt_to_task_id={t.PROMPT: t.ID for t in suite.user_tasks.values()},
         )

@@ -6,23 +6,73 @@
 #PBS -j oe
 
 set -uo pipefail
+if [[ -z "${PBS_JOBID:-}" || -z "${PBS_O_WORKDIR:-}" ]]; then
+  echo "Submit from the repository directory with: qsub -P YOUR_PROJECT_ID scripts/nscc/job.pbs"
+  exit 1
+fi
 cd "$PBS_O_WORKDIR" || exit 1
 
+# Python's module swaps an already-loaded GCC module, so load GCC first.
+module load gcc/11.4.0-nscc || exit 1
+module load python/3.11.7-gcc11 || exit 1
+
 MODEL="${MODEL:-cyankiwi/Qwen3.8-27B-AWQ-INT4}"
-ARMS="${ARMS:-full_approve:inf full_escalate:0 full_escalate:1 full_escalate:3 full_escalate:inf cascade:0 cascade:1 cascade:3 cascade:inf}"
-ATTACK="${ATTACK:-}"
-INJ="${INJ:-}"
-USER_TASKS="${USER_TASKS:-}"
+# Default: six attacked cases (three policies x two tasks x one injection).
+# Pass overrides with qsub -v. Explicit empty ATTACK means clean tasks;
+# explicit empty INJ or USER_TASKS means all tasks of that kind.
+ARMS="${ARMS:-cascade:1 task_scoped:1 task_scoped_budget:1}"
+ATTACK="${ATTACK-important_instructions_generic}"
+INJ="${INJ-injection_task_0}"
+USER_TASKS="${USER_TASKS-user_task_0 user_task_1}"
+SUITE="${SUITE:-banking}"
 SEED="${SEED:-0}"
 EXTRA="${EXTRA:-}"
-SCRATCH_DIR="${SCRATCH_DIR:-/scratch/users/ntu/jonatha4}"
+SCRATCH_DIR="${SCRATCH_DIR:-/scratch/users/ntu/tejasvit}"
+VLLM_ENV="${VLLM_ENV:-$HOME/vllm-env}"
+BENCH_PYTHON="$PBS_O_WORKDIR/.venv/bin/python"
 
-export PATH="$HOME/vllm-env/bin:$PATH"
-export HF_HOME="$SCRATCH_DIR/hf"
+if [[ ! -d "$SCRATCH_DIR" ]]; then
+  echo "Scratch directory does not exist: $SCRATCH_DIR"
+  exit 1
+fi
+if [[ ! -x "$BENCH_PYTHON" ]]; then
+  echo "Missing $BENCH_PYTHON; create the project's Python 3.11+ virtual environment first."
+  exit 1
+fi
+if [[ ! -r "$PBS_O_WORKDIR/.venv/bin/activate" ]]; then
+  echo "Missing benchmark activation script: $PBS_O_WORKDIR/.venv/bin/activate"
+  exit 1
+fi
+source "$PBS_O_WORKDIR/.venv/bin/activate" || exit 1
+echo "Benchmark environment activated: $VIRTUAL_ENV"
+echo "Benchmark Python: $(command -v python)"
+
+if [[ ! -x "$VLLM_ENV/bin/vllm" ]]; then
+  echo "Missing $VLLM_ENV/bin/vllm. Set VLLM_ENV to your working vLLM environment."
+  echo "Example: export VLLM_ENV=/path/to/environment; qsub -P YOUR_PROJECT_ID -v VLLM_ENV scripts/nscc/job.pbs"
+  exit 1
+fi
+if [[ ! -r "$VLLM_ENV/bin/activate" ]]; then
+  echo "Missing vLLM activation script: $VLLM_ENV/bin/activate"
+  echo "VLLM_ENV must point to the Python virtual environment used for vLLM."
+  exit 1
+fi
+if ! "$BENCH_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11); import approval_gate.policies.task_scoped, agentdojo, openai'; then
+  echo "Benchmark environment is incomplete; install the project into .venv with Python 3.11+."
+  exit 1
+fi
+
+export MODEL
+export HF_HOME="${HF_HOME:-$SCRATCH_DIR/hf}"
 export HF_HUB_OFFLINE=1
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export OPENAI_BASE_URL=http://localhost:8000/v1
 export OPENAI_API_KEY=EMPTY
+if [[ ! -d "$HF_HOME/hub" && ! -d "$MODEL" ]]; then
+  echo "No model cache found at $HF_HOME/hub. Download the model there before submitting,"
+  echo "or pass HF_HOME pointing to your existing cache. This job uses offline mode."
+  exit 1
+fi
 
 JOB="${PBS_JOBID%%.*}"
 LOGDIR=results/nscc
@@ -34,7 +84,12 @@ echo "arms: $ARMS"
 echo "attack: ${ATTACK:-none}  injection tasks: ${INJ:-all}  user tasks: ${USER_TASKS:-all}"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
-vllm serve "$MODEL" \
+# Activate the model-server environment only in its subprocess, keeping the
+# benchmark environment active in the parent job and its benchmark workers.
+(
+  source "$VLLM_ENV/bin/activate" || exit 1
+  echo "vLLM environment activated: $VIRTUAL_ENV"
+  exec "$VLLM_ENV/bin/vllm" serve "$MODEL" \
   --max-model-len 16384 \
   --max-num-seqs 32 \
   --limit-mm-per-prompt '{"image":0,"video":0}' \
@@ -42,7 +97,7 @@ vllm serve "$MODEL" \
   --seed 0 \
   --reasoning-parser qwen3 \
   --enable-auto-tool-choice --tool-call-parser qwen3_xml \
-  > "$VLLM_LOG" 2>&1 &
+) > "$VLLM_LOG" 2>&1 &
 VLLM_PID=$!
 trap 'kill "$VLLM_PID" 2>/dev/null' EXIT
 
@@ -58,12 +113,26 @@ if ! curl -sf localhost:8000/v1/models > /dev/null; then
 fi
 echo "vLLM ready"
 
-if ! .venv/bin/python -c "
+if ! "$BENCH_PYTHON" -c '
+import os
 import openai
-m = openai.OpenAI().chat.completions.create(model='$MODEL', messages=[{'role':'user','content':'say ok'}], max_tokens=20)
-print('probe:', repr(m.choices[0].message.content))
-"; then
+m = openai.OpenAI().chat.completions.create(
+    model=os.environ["MODEL"],
+    messages=[{"role": "user", "content": "say ok"}], max_tokens=20,
+)
+print("probe:", repr(m.choices[0].message.content))
+'; then
   echo "probe request failed"; tail -20 "$VLLM_LOG"; exit 1
+fi
+
+# Optional reviewer-only experiment: replay saved contexts, execute no agent tools.
+# Pass REPLAY_CASES=tests/fixtures/reviewer_task_scope.jsonl with qsub -v.
+if [[ -n "${REPLAY_CASES:-}" ]]; then
+  echo "Replaying legacy and task-scoped reviewers on $REPLAY_CASES"
+  "$BENCH_PYTHON" scripts/replay_reviewer.py \
+    --cases "$REPLAY_CASES" --suite "$SUITE" --model "$MODEL" --seed "$SEED" \
+    --output "$LOGDIR/reviewer_replay_$JOB.jsonl"
+  exit $?
 fi
 
 PIDS=()
@@ -75,7 +144,7 @@ for ARM in $ARMS; do
   ARM_ATTACK="$ATTACK"
   [[ "$REST" == *:* ]] && ARM_ATTACK="${REST#*:}"
   NAME="${POLICY}_k${K}_s${SEED}${ARM_ATTACK:+_$ARM_ATTACK}"
-  ARGS=(--model "$MODEL" --policy "$POLICY" --k "$K" --seed "$SEED" --force-rerun)
+  ARGS=(--model "$MODEL" --suite "$SUITE" --policy "$POLICY" --k "$K" --seed "$SEED" --force-rerun)
   [ -n "$ARM_ATTACK" ] && ARGS+=(--attack "$ARM_ATTACK")
   # shellcheck disable=SC2086
   [ -n "$INJ" ] && ARGS+=(--injection-tasks $INJ)
@@ -84,7 +153,7 @@ for ARM in $ARMS; do
   # shellcheck disable=SC2086
   [ -n "$EXTRA" ] && ARGS+=($EXTRA)
   echo "starting $NAME"
-  .venv/bin/python scripts/run_benchmark.py "${ARGS[@]}" > "$LOGDIR/${NAME}_$JOB.log" 2>&1 &
+  "$BENCH_PYTHON" scripts/run_benchmark.py "${ARGS[@]}" > "$LOGDIR/${NAME}_$JOB.log" 2>&1 &
   PIDS+=($!)
   NAMES+=("$NAME")
 done

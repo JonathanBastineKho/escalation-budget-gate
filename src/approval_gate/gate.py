@@ -78,6 +78,8 @@ class ApprovalGate:
 
         reviewer_verdict = None
         reviewer_reason = None
+        reviewer_parse_failed = False
+        reviewer_assessment = {}
         tokens_in, tokens_out = self.policy.take_usage()
 
         if decision is Decision.ESCALATE:
@@ -91,6 +93,8 @@ class ApprovalGate:
                 result = self.reviewer.review(ctx)
                 reviewer_verdict = result.verdict
                 reviewer_reason = result.reason
+                reviewer_parse_failed = getattr(result, "parse_failed", False)
+                reviewer_assessment = getattr(result, "assessment", {})
                 approved = result.verdict == "APPROVE"
                 node = "reviewer"
                 tokens_in["reviewer"] = result.tokens_in
@@ -128,6 +132,9 @@ class ApprovalGate:
             policy_node=policy_node,
             policy_details=self.policy.decision_details(),
             model_policy=self.meta.model_policy,
+            reviewer_mode=getattr(self.reviewer, "mode", None),
+            reviewer_parse_failed=reviewer_parse_failed,
+            reviewer_assessment=reviewer_assessment,
         )
         if self.logger is not None:
             self.logger.log(record)
