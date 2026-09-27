@@ -31,6 +31,7 @@ class RunMeta:
     model_agent: str
     model_gate: str
     attack_name: str | None = None
+    model_reviewer: str | None = None
 
 
 @dataclass
@@ -45,6 +46,7 @@ class DecisionRecord:
     seed: int
     model_agent: str
     model_gate: str
+    model_reviewer: str | None
     attack_name: str | None
     step_index: int
 

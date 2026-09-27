@@ -10,6 +10,7 @@ the decision log appends, so a resumed run splits across two run_ids.
 from __future__ import annotations
 
 import argparse
+import os
 import uuid
 from pathlib import Path
 
@@ -93,7 +94,13 @@ def main() -> None:
     parser.add_argument(
         "--gate-model",
         default=None,
-        help="model for the simulated reviewer; defaults to --model",
+        help="model for the gate's own LLM calls (Nodes 1 to 4); defaults to --model",
+    )
+    parser.add_argument(
+        "--reviewer-model",
+        default=None,
+        help="model for the simulated reviewer (Node 5); defaults to --gate-model. "
+             "Set REVIEWER_BASE_URL if it is served from a different server",
     )
     parser.add_argument(
         "--attack",
@@ -124,6 +131,7 @@ def main() -> None:
     if args.policy != "undefended":
         check_coverage(t.name for t in suite.tools)
         gate_model = args.gate_model or args.model
+        reviewer_model = args.reviewer_model or gate_model
         logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.suite}__{args.attack or 'none'}.jsonl")
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
@@ -133,13 +141,17 @@ def main() -> None:
             seed=args.seed,
             model_agent=args.model,
             model_gate=gate_model,
+            model_reviewer=reviewer_model,
             attack_name=args.attack,
         )
         gate = ApprovalGate(
             policy=POLICIES[args.policy](),
             meta=meta,
             logger=logger,
-            reviewer=SimulatedReviewer(build_client(args.seed), gate_model),
+            reviewer=SimulatedReviewer(
+                build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL")),
+                reviewer_model,
+            ),
             # The gate only receives the prompt, so map it back to the task id.
             prompt_to_task_id={t.PROMPT: t.ID for t in suite.user_tasks.values()},
         )

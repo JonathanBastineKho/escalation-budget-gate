@@ -109,6 +109,7 @@ class ApprovalGate:
             seed=self.meta.seed,
             model_agent=self.meta.model_agent,
             model_gate=self.meta.model_gate,
+            model_reviewer=self.meta.model_reviewer,
             attack_name=self.meta.attack_name,
             step_index=self.step_index,
             tool_name=tool_call.function,

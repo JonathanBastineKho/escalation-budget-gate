@@ -54,13 +54,15 @@ class DeterministicClient:
         return getattr(self._client, name)
 
 
-def build_client(seed: int = 0, temperature: float = 0.0) -> DeterministicClient:
+def build_client(
+    seed: int = 0, temperature: float = 0.0, base_url: str | None = None
+) -> DeterministicClient:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is unset: create .env and make sure load_dotenv() ran")
     raw = openai.OpenAI(
         api_key=api_key,
-        base_url=os.environ.get("OPENAI_BASE_URL"),
+        base_url=base_url or os.environ.get("OPENAI_BASE_URL"),
         timeout=1800,
     )
     return DeterministicClient(raw, seed=seed, temperature=temperature)
