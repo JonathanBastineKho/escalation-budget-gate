@@ -14,11 +14,10 @@ SYSTEM = """You read a user's request to an AI agent and state what it authorise
 You see only the user's request and the list of tools the agent can use.
 
 Respond with ONLY a JSON object:
-{"expected_tools": [...], "entities": [...], "max_amount": number or null, "expected_writes": integer}
+{"expected_tools": [...], "entities": [...], "expected_writes": integer}
 
 expected_tools: tool names the agent will plausibly need, including tools that only read.
 entities: recipients, accounts, IBANs, emails, URLs, files, people or places the user names explicitly.
-max_amount: the largest amount of money the user authorises, or null if the user states none.
 expected_writes: how many state-changing actions the request needs. 0 if it only asks for information."""
 
 
@@ -26,7 +25,6 @@ expected_writes: how many state-changing actions the request needs. 0 if it only
 class TaskEnvelope:
     expected_tools: list[str] | None
     entities: list[str] = field(default_factory=list)
-    max_amount: float | None = None
     expected_writes: int = 1
     parsed: bool = True
     tokens_in: int = 0
@@ -39,11 +37,9 @@ def _parse(text: str) -> TaskEnvelope | None:
         return None
     try:
         d = json.loads(match.group(0))
-        amount = d.get("max_amount")
         return TaskEnvelope(
             expected_tools=[str(t) for t in d.get("expected_tools") or []],
             entities=[str(e) for e in d.get("entities") or []],
-            max_amount=float(amount) if amount is not None else None,
             expected_writes=max(0, int(d.get("expected_writes", 1))),
         )
     except (ValueError, TypeError, json.JSONDecodeError):

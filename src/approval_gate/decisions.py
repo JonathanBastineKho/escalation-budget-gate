@@ -58,6 +58,7 @@ class DecisionRecord:
     critical_args: dict = field(default_factory=dict)
 
     taint_flags: dict = field(default_factory=dict)
+    risk_features: dict = field(default_factory=dict)   # Node 3 features and the scorer used
     envelope_deviation: float = 0.0
     risk_R: float = 0.0
     harm_H: float = 0.0

@@ -6,12 +6,16 @@ import math
 from dataclasses import dataclass
 
 from approval_gate.nodes.allowlist import Tier
+from approval_gate.settings import POLICY
 
-BLOCK_COST = {Tier.WRITE: 0.7, Tier.IRREVERSIBLE_EXTERNAL: 0.9}   # provisional, to be measured
-TAU_LOW = 0.05
-TAU_DENY = 0.8
-VOI_MAX = 0.5
-STATIC_BAR = VOI_MAX * 0.5
+_V = POLICY["voi"]
+BLOCK_COST = {
+    Tier.WRITE: _V["block_cost"]["write"],
+    Tier.IRREVERSIBLE_EXTERNAL: _V["block_cost"]["irreversible_external"],
+}
+TAU_LOW = _V["bar_floor"]
+VOI_MAX = _V["bar_ceiling"]
+STATIC_BAR = _V["static_bar"]
 
 
 @dataclass

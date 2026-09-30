@@ -59,8 +59,8 @@ class ApprovalGate:
         self._agent_mark = replace(self.agent_meter)
 
     def start_case(self, user_task_id: str, injection_task_id: str | None) -> None:
-        """Called once per AgentDojo case, before its first query(). Only sets
-        ids and counters for logging; the budget still resets in start_task."""
+        """Called once per AgentDojo case, before its first query(). The budget
+        resets on the case's first start_task, so retries share one budget."""
         self.task_id = user_task_id
         self.injection_task_id = injection_task_id
         self._start_case_counters()
@@ -92,12 +92,15 @@ class ApprovalGate:
             self.logger.log_case(record)
 
     def start_task(self, user_prompt: str) -> None:
-        """Resets per-task state so budget and cached decisions never carry
-        over between tasks."""
+        """Called on every attempt. AgentDojo retries a case when the agent ends
+        without text, keeping the environment, so only the first attempt resets
+        the budget and the policy's memory."""
+        self._attempts += 1
+        if self._attempts > 1:
+            return
         self.user_prompt = user_prompt
         self.k_remaining = self.meta.k_budget
         self.step_index = 0
-        self._attempts += 1
         self.policy.start_task(self.task_id, user_prompt)
 
     def _agent_tokens_since_last_call(self) -> tuple[int, int]:

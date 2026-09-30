@@ -1,15 +1,13 @@
-"""Argument helpers shared by the scope cache and taint tracking."""
+"""Argument roles and value matching shared by Nodes 2 and 3."""
 
 from __future__ import annotations
 
 import re
 
-DESTINATION_NAMES = {
-    "recipient", "recipients", "to", "email", "emails", "iban", "url", "channel",
-    "user", "participants", "hotel", "restaurant", "company",
-}
-TARGET_NAMES = {"id", "file_id", "file_path", "filename"}
-CRITICAL_NAMES = DESTINATION_NAMES | TARGET_NAMES | {"amount", "password"}
+from approval_gate.nodes.allowlist import TOOL_ROLES, classify
+
+DESTINATION = "destination"
+TARGET = "target"
 
 _IBAN = re.compile(r"[a-z]{2}\d{2}[a-z0-9]{10,30}")
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
@@ -36,13 +34,24 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", str(text).lower())
 
 
-def critical_args(args: dict) -> dict:
-    return {k: v for k, v in args.items() if k in CRITICAL_NAMES}
+def arg_roles(tool: str, args: dict) -> dict[str, str]:
+    """Unlabelled write tools treat every argument as a destination (fail closed)."""
+    if tool in TOOL_ROLES:
+        return {k: r for k, r in TOOL_ROLES[tool].items() if k in args}
+    if classify(tool).level == 0:
+        return {}
+    return {k: DESTINATION for k in args}
 
 
-def destination_args(args: dict) -> dict:
-    dest = {k: v for k, v in args.items() if k in DESTINATION_NAMES}
-    return dest or {k: v for k, v in args.items() if k in TARGET_NAMES}
+def critical_args(tool: str, args: dict) -> dict:
+    return {k: args[k] for k in arg_roles(tool, args)}
+
+
+def destination_args(tool: str, args: dict) -> dict:
+    """A tool's destinations, or its targets when it has none."""
+    roles = arg_roles(tool, args)
+    dest = {k: args[k] for k, r in roles.items() if r == DESTINATION}
+    return dest or {k: args[k] for k, r in roles.items() if r == TARGET}
 
 
 def appears_in(value, text: str) -> bool:

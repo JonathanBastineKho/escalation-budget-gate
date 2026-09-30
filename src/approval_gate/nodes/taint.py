@@ -10,7 +10,7 @@ TOOL_OUTPUT = "TOOL_OUTPUT"
 AGENT = "AGENT"
 UNKNOWN = "UNKNOWN"
 
-_RANK = {USER: 0, DELEGATED: 1, AGENT: 2, UNKNOWN: 3, TOOL_OUTPUT: 4}
+RANK = {USER: 0, DELEGATED: 1, AGENT: 2, UNKNOWN: 3, TOOL_OUTPUT: 4}
 
 
 def _text(message) -> str:
@@ -43,11 +43,11 @@ def taint_flags(ctx) -> dict[str, str]:
     agent = " ".join(normalize_text(_text(m)) for m in ctx.messages if m.get("role") == "assistant")
 
     flags = {}
-    for name, value in critical_args(dict(ctx.tool_call.args)).items():
+    for name, value in critical_args(ctx.tool_call.function, dict(ctx.tool_call.args)).items():
         worst = USER
         for v in flatten(value):
             flag = _origin(v, prompt, outputs, agent)
-            if _RANK[flag] > _RANK[worst]:
+            if RANK[flag] > RANK[worst]:
                 worst = flag
         flags[name] = worst
     return flags

@@ -102,8 +102,8 @@ def track_cases(suite, gate: ApprovalGate) -> None:
 
 
 class GatedAgentPipeline(AgentPipeline):
-    """Resets the gate at the start of each task. AgentDojo reuses one
-    pipeline for every task and calls query() once per task."""
+    """Tells the gate about every attempt. AgentDojo reuses one pipeline for
+    every task and may call query() more than once per case."""
 
     def __init__(self, elements, gate: ApprovalGate) -> None:
         super().__init__(elements)
