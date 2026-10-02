@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -36,15 +37,23 @@ from dotenv import load_dotenv
 
 import approval_gate.attacks  # noqa: F401  (registers important_instructions_generic)
 from approval_gate.decisions import RunMeta
-from approval_gate.executor import GatedAgentPipeline, GatedToolsExecutor
+from approval_gate.executor import GatedAgentPipeline, GatedToolsExecutor, track_cases
 from approval_gate.gate import ApprovalGate
-from approval_gate.llm import build_client, build_llm, pipeline_name
+from approval_gate.llm import UsageMeter, build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import Tier, check_coverage, classify
+from approval_gate.nodes.envelope import EnvelopeExtractor
 from approval_gate.policies.cascade import CascadePolicy
+from approval_gate.policies.cascade_n1 import CascadeN1Policy
 from approval_gate.policies.full_approve import FullApprovePolicy
 from approval_gate.policies.full_escalate import FullEscalatePolicy
+from approval_gate.policies.static_threshold import StaticThresholdPolicy
 from approval_gate.policies.task_scoped import EXTRACTION_SYSTEM, ScopeExtractor, TaskScopedPolicy
-from approval_gate.reviewer.prompts import TASK_SCOPED_SYSTEM, TASK_SCOPED_TEMPLATE
+from approval_gate.reviewer.prompts import (
+    SYSTEM,
+    TASK_SCOPED_SYSTEM,
+    TASK_SCOPED_TEMPLATE,
+    USER_TEMPLATE,
+)
 from approval_gate.reviewer.simulated import REVIEWER_MODES, SimulatedReviewer
 from approval_gate.telemetry.logger import DecisionLogger
 
@@ -52,19 +61,28 @@ BENCHMARK_VERSION = "v1.2.1"
 POLICIES = {
     "full_approve": FullApprovePolicy,
     "full_escalate": FullEscalatePolicy,
+    "cascade_n1": CascadeN1Policy,
     "cascade": CascadePolicy,
     "task_scoped": TaskScopedPolicy,
     "task_scoped_budget": TaskScopedPolicy,
+    "static_threshold": StaticThresholdPolicy,
 }
+NEEDS_ENVELOPE = {"cascade", "static_threshold"}
 
 # AgentDojo's prompt plus one line: nothing answers the agent's questions, and
 # asking one ends the task. Same message for every policy.
 BASE_SYSTEM_MESSAGE = load_system_message(None).rstrip("\n") + "\n  - Do not ask the user questions.\n"
 
 
-def build_pipeline(model: str, gate: ApprovalGate | None, name: str, seed: int = 0) -> AgentPipeline:
+def build_pipeline(
+    model: str,
+    gate: ApprovalGate | None,
+    name: str,
+    seed: int = 0,
+    agent_meter: UsageMeter | None = None,
+) -> AgentPipeline:
     """gate=None builds stock AgentDojo; otherwise only the executor differs."""
-    llm = build_llm(model, seed=seed)
+    llm = build_llm(model, seed=seed, meter=agent_meter)
 
     if gate is None:
         tools_loop = ToolsExecutionLoop([ToolsExecutor(), llm])
@@ -83,6 +101,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--suite", default="banking")
+    parser.add_argument("--gate-model", default=None,
+                        help="gate model; also the reviewer default unless --reviewer-model is set")
     parser.add_argument("--reviewer-mode", choices=REVIEWER_MODES, default="task_scoped",
                         help="task_scoped uses delegated authorization; legacy reproduces old review")
     parser.add_argument(
@@ -103,9 +123,10 @@ def main() -> None:
         help="repeat index; at temperature 0 it separates repeats rather than changing output",
     )
     parser.add_argument(
-        "--gate-model",
+        "--reviewer-model",
         default=None,
-        help="model for the simulated reviewer; defaults to --model",
+        help="model for the simulated reviewer (Node 5); defaults to --model, which also "
+             "serves Nodes 1 to 4. Set REVIEWER_BASE_URL if it is on a different server",
     )
     parser.add_argument(
         "--attack",
@@ -113,7 +134,11 @@ def main() -> None:
         help="omit for a clean (utility) run; 'important_instructions_generic' for the "
              "injection runs behind the TCR@k curve",
     )
-    parser.add_argument("--logdir", default="results/runs")
+    parser.add_argument(
+        "--logdir",
+        default="results/runs",
+        help="AgentDojo run logs; decisions/ and cases/ are written next to it",
+    )
     parser.add_argument("--user-tasks", nargs="*", default=None)
     parser.add_argument(
         "--injection-tasks",
@@ -135,9 +160,11 @@ def main() -> None:
 
     gate = None
     logger = None
+    agent_meter = None
     if args.policy != "undefended":
         check_coverage(t.name for t in suite.tools)
         gate_model = args.gate_model or args.model
+        reviewer_model = args.reviewer_model or gate_model
         policy_model = args.policy_model or gate_model
         if args.policy in {"task_scoped", "task_scoped_budget"}:
             schemas = {
@@ -151,23 +178,34 @@ def main() -> None:
             # Keep policy/reviewer changes out of the same AgentDojo result cache.
             config = json.dumps({
                 "version": "task-scoped-v1", "policy_model": policy_model,
-                "reviewer_model": gate_model, "schemas": schemas,
+                "reviewer_model": reviewer_model, "schemas": schemas,
                 "extractor_prompt": EXTRACTION_SYSTEM,
             }, sort_keys=True)
             tag = hashlib.sha256(config.encode()).hexdigest()[:10]
             name = pipeline_name(f"{args.model}-scope{tag}", args.policy, k, args.seed)
+        elif args.policy in NEEDS_ENVELOPE:
+            tools = [(t.name, t.description.strip().splitlines()[0]) for t in suite.tools]
+            policy = POLICIES[args.policy](
+                EnvelopeExtractor(build_client(args.seed), gate_model, tools))
         else:
             policy = POLICIES[args.policy]()
-        if args.reviewer_mode != "legacy":
-            review_config = json.dumps({
-                "version": "review-scope-v1", "mode": args.reviewer_mode,
-                "model": gate_model, "system": TASK_SCOPED_SYSTEM,
-                "template": TASK_SCOPED_TEMPLATE,
-            }, sort_keys=True)
-            review_tag = hashlib.sha256(review_config.encode()).hexdigest()[:10]
-            # Prefix keeps the existing policy/k/seed suffix readable by analysis.
-            name = f"review{review_tag}-{name}"
-        logger = DecisionLogger(Path("results/decisions") / f"{name}__{args.attack or 'none'}.jsonl")
+        review_config = json.dumps({
+            "version": "integrated-gate-v2", "mode": args.reviewer_mode,
+            "model": reviewer_model, "gate_model": gate_model,
+            "system": TASK_SCOPED_SYSTEM if args.reviewer_mode == "task_scoped" else SYSTEM,
+            "template": TASK_SCOPED_TEMPLATE if args.reviewer_mode == "task_scoped" else USER_TEMPLATE,
+        }, sort_keys=True)
+        review_tag = hashlib.sha256(review_config.encode()).hexdigest()[:10]
+        # Isolate updated cascade/retry behavior and distinct reviewer configurations.
+        name = f"review{review_tag}-{name}"
+        agent_meter = UsageMeter()
+        # runs/, decisions/ and cases/ stay side by side, e.g. under results/share/<model>/.
+        out_root = Path(args.logdir).parent
+        log_name = f"{name}__{args.suite}__{args.attack or 'none'}.jsonl"
+        logger = DecisionLogger(
+            out_root / "decisions" / log_name,
+            cases_path=out_root / "cases" / log_name,
+        )
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
             suite=args.suite,
@@ -176,6 +214,7 @@ def main() -> None:
             seed=args.seed,
             model_agent=args.model,
             model_gate=gate_model,
+            model_reviewer=reviewer_model,
             attack_name=args.attack,
             model_policy=policy_model if args.policy.startswith("task_scoped") else None,
         )
@@ -184,15 +223,17 @@ def main() -> None:
             meta=meta,
             logger=logger,
             reviewer=SimulatedReviewer(
-                build_client(args.seed), gate_model, mode=args.reviewer_mode,
+                build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL")),
+                reviewer_model, mode=args.reviewer_mode,
                 tool_schemas={t.name: {**t.parameters.model_json_schema(),
                                       "description": t.description} for t in suite.tools},
             ),
-            # The gate only receives the prompt, so map it back to the task id.
-            prompt_to_task_id={t.PROMPT: t.ID for t in suite.user_tasks.values()},
+            agent_meter=agent_meter,
         )
+        # Gives the gate each case's ids and outcome for the logs.
+        track_cases(suite, gate)
 
-    pipeline = build_pipeline(args.model, gate, name, seed=args.seed)
+    pipeline = build_pipeline(args.model, gate, name, seed=args.seed, agent_meter=agent_meter)
     logdir = Path(args.logdir)
     header = f"\nsuite={args.suite} model={args.model} policy={args.policy} k={args.k} seed={args.seed}"
 

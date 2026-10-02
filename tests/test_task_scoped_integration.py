@@ -142,15 +142,17 @@ def test_benchmark_entrypoint_builds_policy_and_writes_extraction_cost(
         )
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    monkeypatch.setattr(runner, "build_client", lambda seed: client)
-    monkeypatch.setattr(runner, "build_pipeline", lambda model, gate, name, seed:
+    monkeypatch.setattr(runner, "build_client", lambda seed, **kwargs: client)
+    monkeypatch.setattr(runner, "build_pipeline", lambda model, gate, name, seed, agent_meter:
                         SimpleNamespace(gate=gate, name=name))
 
     def benchmark(pipeline, suite, **kwargs):
+        pipeline.gate.start_case("user_task_0", None)
         pipeline.gate.start_task(PROMPT)
         assert pipeline.gate.decide(call(), []).approved
         assert pipeline.gate.k_remaining == 0
         assert pipeline.gate.policy.budget_aware == (policy_name == "task_scoped_budget")
+        pipeline.gate.end_case(True, None, None)
         return {"utility_results": {("user_task_0", None): True}}
 
     monkeypatch.setattr(runner, "benchmark_suite_without_injections", benchmark)
@@ -166,3 +168,8 @@ def test_benchmark_entrypoint_builds_policy_and_writes_extraction_cost(
     assert record["model_policy"] == "extractor"
     assert record["tokens_in"] == {"policy": 100}
     assert record["policy_node"] == "scope_exact_match"
+
+    case_log = next((tmp_path / "results" / "cases").glob("*.jsonl"))
+    case = json.loads(case_log.read_text())
+    assert case["tokens_in"]["policy"] == 100
+    assert case["task_id"] == record["task_id"] == "user_task_0"

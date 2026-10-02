@@ -1,4 +1,4 @@
-"""JSONL decision log, one record per tool call."""
+"""JSONL logs: one record per tool call, and one per case."""
 
 from __future__ import annotations
 
@@ -7,17 +7,21 @@ from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 
-from approval_gate.decisions import DecisionRecord
+from approval_gate.decisions import CaseRecord, DecisionRecord
 
 
 class DecisionLogger:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, cases_path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        cases_path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._fh = path.open("a", encoding="utf-8")
+        self._cases_fh = cases_path.open("a", encoding="utf-8")
         self.decisions: Counter[str] = Counter()
         self.escalations_used = 0
         self.denied = 0
+        # From case records: they include the agent's final turn, which
+        # per-call records miss.
         self.tokens_in: Counter[str] = Counter()
         self.tokens_out: Counter[str] = Counter()
 
@@ -29,6 +33,10 @@ class DecisionLogger:
             self.escalations_used += 1
         if not record.executed:
             self.denied += 1
+
+    def log_case(self, record: CaseRecord) -> None:
+        self._cases_fh.write(json.dumps(asdict(record)) + "\n")
+        self._cases_fh.flush()
         self.tokens_in.update(record.tokens_in)
         self.tokens_out.update(record.tokens_out)
 
@@ -46,3 +54,4 @@ class DecisionLogger:
 
     def close(self) -> None:
         self._fh.close()
+        self._cases_fh.close()

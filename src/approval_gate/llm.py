@@ -7,9 +7,24 @@ model names from AgentDojo's fixed ModelsEnum.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 
 import openai
 from agentdojo.agent_pipeline import OpenAILLM
+
+
+@dataclass
+class UsageMeter:
+    """Running token totals for one client. AgentDojo's OpenAILLM discards
+    response.usage, so this is the only record of the agent's tokens."""
+
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+    def add(self, usage) -> None:
+        if usage is not None:
+            self.tokens_in += usage.prompt_tokens
+            self.tokens_out += usage.completion_tokens
 
 
 class _Completions:
@@ -20,45 +35,72 @@ class _Completions:
     default (0.8 on Ollama). AgentDojo also never sends a seed.
     """
 
-    def __init__(self, inner, seed: int, temperature: float) -> None:
+    def __init__(self, inner, seed: int, temperature: float, meter: UsageMeter | None) -> None:
         self._inner, self._seed, self._temperature = inner, seed, temperature
+        self._meter = meter
 
     def create(self, **kwargs):
         kwargs["temperature"] = self._temperature
         kwargs["seed"] = self._seed
-        return self._inner.create(**kwargs)
+        try:
+            response = self._inner.create(**kwargs)
+        except openai.BadRequestError as e:
+            # AgentDojo skips a case on overflow only if it recognises the error;
+            # vLLM words it differently, which crashed the whole arm instead.
+            if "maximum context length" not in str(e):
+                raise
+            body = dict(e.body) if isinstance(e.body, dict) else {}
+            body["code"] = "context_length_exceeded"
+            raise openai.BadRequestError(str(e), response=e.response, body=body) from e
+        if self._meter is not None:
+            self._meter.add(response.usage)
+        return response
 
 
 class _Chat:
-    def __init__(self, inner, seed: int, temperature: float) -> None:
-        self.completions = _Completions(inner.completions, seed, temperature)
+    def __init__(self, inner, seed: int, temperature: float, meter: UsageMeter | None) -> None:
+        self.completions = _Completions(inner.completions, seed, temperature, meter)
 
 
 class DeterministicClient:
-    """openai.OpenAI proxy that pins temperature and seed on every call."""
+    """openai.OpenAI proxy that pins temperature and seed on every call, and
+    counts tokens into `meter` when one is given."""
 
-    def __init__(self, client: openai.OpenAI, seed: int, temperature: float = 0.0) -> None:
+    def __init__(
+        self,
+        client: openai.OpenAI,
+        seed: int,
+        temperature: float = 0.0,
+        meter: UsageMeter | None = None,
+    ) -> None:
         self._client = client
-        self.chat = _Chat(client.chat, seed, temperature)
+        self.chat = _Chat(client.chat, seed, temperature, meter)
 
     def __getattr__(self, name):
         return getattr(self._client, name)
 
 
-def build_client(seed: int = 0, temperature: float = 0.0) -> DeterministicClient:
+def build_client(
+    seed: int = 0,
+    temperature: float = 0.0,
+    meter: UsageMeter | None = None,
+    base_url: str | None = None,
+) -> DeterministicClient:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is unset: create .env and make sure load_dotenv() ran")
     raw = openai.OpenAI(
         api_key=api_key,
-        base_url=os.environ.get("OPENAI_BASE_URL"),
+        base_url=base_url or os.environ.get("OPENAI_BASE_URL"),
         timeout=1800,
     )
-    return DeterministicClient(raw, seed=seed, temperature=temperature)
+    return DeterministicClient(raw, seed=seed, temperature=temperature, meter=meter)
 
 
-def build_llm(model: str, seed: int = 0, temperature: float = 0.0) -> OpenAILLM:
-    return OpenAILLM(build_client(seed, temperature), model, temperature=temperature)
+def build_llm(
+    model: str, seed: int = 0, temperature: float = 0.0, meter: UsageMeter | None = None
+) -> OpenAILLM:
+    return OpenAILLM(build_client(seed, temperature, meter), model, temperature=temperature)
 
 
 def pipeline_name(model: str, policy: str, k: int | None = None, seed: int = 0) -> str:

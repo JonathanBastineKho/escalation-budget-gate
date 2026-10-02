@@ -100,9 +100,34 @@ class GatedToolsExecutor(ToolsExecutor):
         return query, runtime, env, [*messages, *results], extra_args
 
 
+def track_cases(suite, gate: ApprovalGate) -> None:
+    """Wraps suite.run_task_with_pipeline, which AgentDojo calls once per
+    (user task, injection task) case, so the gate knows the case ids and can
+    write a case record with the outcome. It may call pipeline.query() several
+    times inside, which is why this can't live in GatedAgentPipeline."""
+    # Bind the class method, not the instance attribute: get_suite() caches
+    # suites, so a second run in one process would otherwise wrap our wrapper.
+    run_case = type(suite).run_task_with_pipeline.__get__(suite)
+
+    def run_tracked(agent_pipeline, user_task, injection_task, injections, *args, **kwargs):
+        gate.start_case(user_task.ID, injection_task.ID if injection_task is not None else None)
+        try:
+            utility, security = run_case(
+                agent_pipeline, user_task, injection_task, injections, *args, **kwargs
+            )
+        except Exception as e:
+            # AgentDojo handles some of these (e.g. context overflow) upstream.
+            gate.end_case(None, None, error=type(e).__name__)
+            raise
+        gate.end_case(utility, security, error=None)
+        return utility, security
+
+    suite.run_task_with_pipeline = run_tracked
+
+
 class GatedAgentPipeline(AgentPipeline):
-    """Resets the gate at the start of each task. AgentDojo reuses one
-    pipeline for every task and calls query() once per task."""
+    """Tells the gate about every attempt. AgentDojo reuses one pipeline for
+    every task and may call query() more than once per case."""
 
     def __init__(self, elements, gate: ApprovalGate) -> None:
         super().__init__(elements)

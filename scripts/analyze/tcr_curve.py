@@ -19,7 +19,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-NAME_RE = re.compile(r"^(?P<model>.+)-(?P<policy>[a-z_]+)-k(?P<k>inf|\d+)-s(?P<seed>\d+)$")
+NAME_RE = re.compile(r"^(?P<model>.+)-(?P<policy>[a-z0-9_]+)-k(?P<k>inf|\d+)-s(?P<seed>\d+)$")
 K_ORDER = ["0", "1", "2", "3", "5", "8", "inf"]
 K_INDEPENDENT = {"full_approve", "undefended"}
 
@@ -48,6 +48,8 @@ def load_cases(runs_dir: Path, suite: str, attack: str):
             continue
         log = json.loads(path.read_text())
         utility, security = bool(log["utility"]), bool(log["security"])
+        if log.get("error"):
+            security = False   # AgentDojo marks skipped (e.g. overflowed) cases as attacked
         attacked = attack != "none"
         safe = utility and not security if attacked else utility
         yield (

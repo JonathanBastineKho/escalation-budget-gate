@@ -4,11 +4,13 @@ Policies only decide; the gate enforces, so a policy cannot overspend."""
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 
 from agentdojo.functions_runtime import FunctionCall
 
-from approval_gate.decisions import Decision, DecisionRecord, RunMeta, hash_args
+from approval_gate.decisions import CaseRecord, Decision, DecisionRecord, RunMeta, hash_args
+from approval_gate.llm import UsageMeter
 from approval_gate.nodes.allowlist import classify
 from approval_gate.policies.base import CallContext, Policy
 
@@ -27,31 +29,89 @@ class ApprovalGate:
         self,
         policy: Policy,
         meta: RunMeta,
+        agent_meter: UsageMeter | None = None,
         logger=None,
         reviewer=None,
         denial_style: str = "generic",
-        prompt_to_task_id: dict[str, str] | None = None,
     ) -> None:
         self.policy = policy
         self.meta = meta
+        self.agent_meter = agent_meter or UsageMeter()
         self.logger = logger
         self.reviewer = reviewer
         self.denial_style = denial_style
-        self.prompt_to_task_id = prompt_to_task_id or {}
 
         self.task_id = "unknown"
+        self.injection_task_id: str | None = None
         self.user_prompt = ""
         self.k_remaining: int | None = meta.k_budget
         self.step_index = 0
+        self._start_case_counters()
+
+    def _start_case_counters(self) -> None:
+        self._attempts = 0
+        self._gated_calls = 0
+        self._escalations = 0
+        self._tokens_in: Counter[str] = Counter()
+        self._tokens_out: Counter[str] = Counter()
+        # Snapshots of agent usage at case start, and at the last gated call.
+        self._agent_case_start = replace(self.agent_meter)
+        self._agent_mark = replace(self.agent_meter)
+
+    def start_case(self, user_task_id: str, injection_task_id: str | None) -> None:
+        """Called once per AgentDojo case, before its first query(). The budget
+        resets on the case's first start_task, so retries share one budget."""
+        self.task_id = user_task_id
+        self.injection_task_id = injection_task_id
+        self._start_case_counters()
+
+    def end_case(self, utility: bool | None, security: bool | None, error: str | None) -> None:
+        # Whole-case agent usage, including the final turn that proposed no call.
+        start = self._agent_case_start
+        tokens_in = {**self._tokens_in, "agent": self.agent_meter.tokens_in - start.tokens_in}
+        tokens_out = {**self._tokens_out, "agent": self.agent_meter.tokens_out - start.tokens_out}
+        record = CaseRecord(
+            run_id=self.meta.run_id,
+            task_id=self.task_id,
+            injection_task_id=self.injection_task_id,
+            suite=self.meta.suite,
+            policy=self.meta.policy,
+            k_budget=self.meta.k_budget,
+            seed=self.meta.seed,
+            attack_name=self.meta.attack_name,
+            attempts=self._attempts,
+            gated_calls=self._gated_calls,
+            escalations=self._escalations,
+            utility=utility,
+            security=None if self.injection_task_id is None else security,
+            error=error,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+        )
+        if self.logger is not None:
+            self.logger.log_case(record)
 
     def start_task(self, user_prompt: str) -> None:
-        """Resets per-task state so budget and cached decisions never carry
-        over between tasks."""
+        """Called on every attempt. AgentDojo retries a case when the agent ends
+        without text, keeping the environment, so only the first attempt resets
+        the budget and the policy's memory."""
+        self._attempts += 1
+        if self._attempts > 1:
+            return
         self.user_prompt = user_prompt
-        self.task_id = self.prompt_to_task_id.get(user_prompt, "unknown")
         self.k_remaining = self.meta.k_budget
         self.step_index = 0
         self.policy.start_task(self.task_id, user_prompt)
+
+    def _agent_tokens_since_last_call(self) -> tuple[int, int]:
+        """Agent tokens spent since the previous gated call: the model turn that
+        proposed this call. Zero for later calls in the same turn."""
+        delta = (
+            self.agent_meter.tokens_in - self._agent_mark.tokens_in,
+            self.agent_meter.tokens_out - self._agent_mark.tokens_out,
+        )
+        self._agent_mark = replace(self.agent_meter)
+        return delta
 
     def _spend_budget(self) -> bool:
         if self.k_remaining is None:
@@ -81,6 +141,10 @@ class ApprovalGate:
         reviewer_parse_failed = False
         reviewer_assessment = {}
         tokens_in, tokens_out = self.policy.take_usage()
+        agent_in, agent_out = self._agent_tokens_since_last_call()
+        if agent_in or agent_out:
+            tokens_in["agent"] = agent_in
+            tokens_out["agent"] = agent_out
 
         if decision is Decision.ESCALATE:
             if not self._spend_budget():
@@ -102,20 +166,29 @@ class ApprovalGate:
         else:
             approved = decision is Decision.AUTO_APPROVE
 
+        self.policy.observe(ctx, approved, node)
+        for component, n in ctx.features.pop("tokens_in", {}).items():
+            tokens_in[component] = tokens_in.get(component, 0) + n
+        for component, n in ctx.features.pop("tokens_out", {}).items():
+            tokens_out[component] = tokens_out.get(component, 0) + n
+
         # Logged for every policy, so baselines can be grouped by tier too.
         tool_info = classify(tool_call.function)
         record = DecisionRecord(
             run_id=self.meta.run_id,
             task_id=self.task_id,
+            injection_task_id=self.injection_task_id,
             suite=self.meta.suite,
             policy=self.meta.policy,
             k_budget=self.meta.k_budget,
             seed=self.meta.seed,
             model_agent=self.meta.model_agent,
             model_gate=self.meta.model_gate,
+            model_reviewer=self.meta.model_reviewer,
             attack_name=self.meta.attack_name,
             step_index=self.step_index,
             tool_name=tool_call.function,
+            tool_call_id=tool_call.id,
             tool_tier=str(tool_info.tier),
             harm_H=tool_info.harm,
             args_hash=hash_args(dict(tool_call.args)),
@@ -136,9 +209,18 @@ class ApprovalGate:
             reviewer_parse_failed=reviewer_parse_failed,
             reviewer_assessment=reviewer_assessment,
         )
+        for key, value in ctx.features.items():
+            if hasattr(record, key):
+                setattr(record, key, value)
         if self.logger is not None:
             self.logger.log(record)
 
+        self._gated_calls += 1
+        if node == "reviewer":
+            self._escalations += 1
+        # Agent totals come from the meter in end_case; other components add up here.
+        self._tokens_in.update({c: n for c, n in tokens_in.items() if c != "agent"})
+        self._tokens_out.update({c: n for c, n in tokens_out.items() if c != "agent"})
         self.step_index += 1
         return GateOutcome(
             approved=approved,
