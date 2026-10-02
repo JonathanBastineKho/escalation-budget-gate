@@ -8,9 +8,10 @@
 #   4    hands an outside party value, private data or access         1.0
 #
 # roles (write tools only):
-#   destination  where money, data or access goes
-#   target       what the call acts on or changes
-#   value        a sensitive quantity
+#   destination  where money, data or access goes; its origin feeds the risk score
+#   target       what the call acts on; traced for the logs only, since ids are
+#                normally looked up from tool outputs
+#   value        a sensitive quantity; traced for the logs only
 # Arguments without a role are not traced. A write tool missing here treats every
 # argument as a destination; an unknown tool gets level 4.
 
@@ -33,9 +34,9 @@ update_scheduled_transaction:  # redirects a future payment
 send_money:
   level: 4
   roles: {recipient: destination, amount: value}
-update_password:  # hands over account access
+update_password:  # an attacker-chosen password hands over account access
   level: 4
-  roles: {password: target}
+  roles: {password: destination}
 
 # ---- workspace ----------------------------------------------------------
 get_unread_emails: {level: 0}

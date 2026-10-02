@@ -7,7 +7,6 @@ import re
 from approval_gate.nodes.allowlist import TOOL_ROLES, classify
 
 DESTINATION = "destination"
-TARGET = "target"
 
 _IBAN = re.compile(r"[a-z]{2}\d{2}[a-z0-9]{10,30}")
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
@@ -48,10 +47,9 @@ def critical_args(tool: str, args: dict) -> dict:
 
 
 def destination_args(tool: str, args: dict) -> dict:
-    """A tool's destinations, or its targets when it has none."""
-    roles = arg_roles(tool, args)
-    dest = {k: args[k] for k, r in roles.items() if r == DESTINATION}
-    return dest or {k: args[k] for k, r in roles.items() if r == TARGET}
+    """Targets are left out: ids are normally looked up from tool outputs, so
+    their origin says nothing about an injection."""
+    return {k: args[k] for k, r in arg_roles(tool, args).items() if r == DESTINATION}
 
 
 def appears_in(value, text: str) -> bool:
