@@ -106,8 +106,8 @@ def main() -> None:
     parser.add_argument(
         "--reviewer-model",
         default=None,
-        help="model for the simulated reviewer (Node 5); defaults to --model, which also "
-             "serves Nodes 1 to 4. Set REVIEWER_BASE_URL if it is on a different server",
+        help="model for the gate's own LLM calls (envelope) and the simulated reviewer; "
+             "defaults to --model. Set REVIEWER_BASE_URL if it is on a different server",
     )
     parser.add_argument(
         "--attack",
@@ -142,8 +142,8 @@ def main() -> None:
     agent_meter = None
     if args.policy != "undefended":
         check_coverage(t.name for t in suite.tools)
-        gate_model = args.model
         reviewer_model = args.reviewer_model or args.model
+        gate_model = reviewer_model
         agent_meter = UsageMeter()
         # runs/, decisions/ and cases/ stay side by side, e.g. under results/share/<model>/.
         out_root = Path(args.logdir).parent
@@ -163,7 +163,7 @@ def main() -> None:
             model_reviewer=reviewer_model,
             attack_name=args.attack,
         )
-        gate_client = build_client(args.seed)
+        gate_client = build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL"))
         if args.policy in NEEDS_ENVELOPE:
             tools = [(t.name, t.description.strip().splitlines()[0]) for t in suite.tools]
             policy = POLICIES[args.policy](EnvelopeExtractor(gate_client, gate_model, tools))
@@ -173,13 +173,9 @@ def main() -> None:
             policy=policy,
             meta=meta,
             logger=logger,
-            reviewer=SimulatedReviewer(
-                build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL")),
-                reviewer_model,
-            ),
+            reviewer=SimulatedReviewer(gate_client, reviewer_model),
             agent_meter=agent_meter,
         )
-        # Gives the gate each case's ids and outcome for the logs.
         track_cases(suite, gate)
 
     pipeline = build_pipeline(args.model, gate, name, seed=args.seed, agent_meter=agent_meter)
