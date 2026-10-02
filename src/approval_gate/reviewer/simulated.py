@@ -24,6 +24,7 @@ from approval_gate.reviewer.prompts import (
 OPEN = "<<<UNTRUSTED_DATA>>>"
 CLOSE = "<<<END_UNTRUSTED_DATA>>>"
 REVIEWER_MODES = ("legacy", "task_scoped")
+EFFECT_FIELDS = ("authorized_effect", "proposed_effect", "state_after_execution")
 
 
 def _call_dict(call) -> dict:
@@ -102,7 +103,13 @@ def _parse(text: str, strict: bool = False) -> tuple[str, str, bool]:
         try:
             parsed = json.loads(text)
             if (isinstance(parsed, dict) and parsed.get("verdict") in ("APPROVE", "DENY")
-                    and isinstance(parsed.get("reason"), str)):
+                    and isinstance(parsed.get("reason"), str)
+                    and all(isinstance(parsed.get(k), str) and parsed[k].strip()
+                            for k in EFFECT_FIELDS)
+                    and type(parsed.get("effect_matches_authorization")) is bool):
+                if (parsed["verdict"] == "APPROVE"
+                        and not parsed["effect_matches_authorization"]):
+                    return "DENY", "reviewer effect check does not authorize the action", False
                 return parsed["verdict"], parsed["reason"][:200], False
         except (json.JSONDecodeError, TypeError):
             pass
@@ -170,7 +177,8 @@ class SimulatedReviewer:
         assessment = {}
         if self.mode == "task_scoped" and not parse_failed:
             parsed = json.loads(text)
-            assessment = {k: parsed[k] for k in ("scope", "evidence") if k in parsed}
+            assessment = {k: parsed[k] for k in ("scope", "evidence", *EFFECT_FIELDS,
+                                                   "effect_matches_authorization") if k in parsed}
         usage = response.usage
 
         return ReviewResult(
