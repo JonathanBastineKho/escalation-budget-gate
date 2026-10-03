@@ -43,6 +43,8 @@ def _prior_actions(messages, style: str = "sanitized") -> str:
             text = str(content or "").strip()
             if text:
                 lines.append(f"returned:\n{_spotlight(text, style)}")
+            if message.get("error"):
+                lines.append(f"failed, not executed:\n{_spotlight(str(message['error']), style)}")
 
     return "\n".join(lines) or "(no prior actions)"
 
