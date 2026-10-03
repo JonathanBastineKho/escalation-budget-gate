@@ -40,12 +40,14 @@ from approval_gate.gate import ApprovalGate
 from approval_gate.llm import UsageMeter, build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import check_coverage
 from approval_gate.nodes.envelope import EnvelopeExtractor
+from approval_gate.nodes.scorers import FormulaScorer
 from approval_gate.policies.cascade import CascadePolicy
 from approval_gate.policies.cascade_n1 import CascadeN1Policy
 from approval_gate.policies.full_approve import FullApprovePolicy
 from approval_gate.policies.full_escalate import FullEscalatePolicy
 from approval_gate.policies.static_threshold import StaticThresholdPolicy
 from approval_gate.reviewer.simulated import SimulatedReviewer
+from approval_gate.settings import CONFIG_HASH
 from approval_gate.telemetry.logger import DecisionLogger
 
 BENCHMARK_VERSION = "v1.2.1"
@@ -57,9 +59,8 @@ POLICIES = {
     "static_threshold": StaticThresholdPolicy,
 }
 NEEDS_ENVELOPE = {"cascade", "static_threshold"}
+SCORERS = {"formula": FormulaScorer}
 
-# AgentDojo's prompt plus one line: nothing answers the agent's questions, and
-# asking one ends the task. Same message for every policy.
 BASE_SYSTEM_MESSAGE = load_system_message(None).rstrip("\n") + "\n  - Do not ask the user questions.\n"
 
 
@@ -127,15 +128,34 @@ def main() -> None:
         default=None,
         help="subset of injection task IDs (attack runs only); omit for all",
     )
+    parser.add_argument(
+        "--risk-model",
+        default="formula",
+        choices=list(SCORERS),
+        help="Node 3 scorer that turns the features into R (cascade and static_threshold)",
+    )
+    parser.add_argument(
+        "--no-scope-deny",
+        action="store_true",
+        help="ablation: turn off Node 4's scope-rule auto-deny",
+    )
     parser.add_argument("--force-rerun", action="store_true")
     args = parser.parse_args()
 
     load_dotenv()
     if args.attack is not None and args.attack not in ATTACKS:
         parser.error(f"unknown attack {args.attack!r}; registered: {sorted(ATTACKS)}")
+    variant_set = args.risk_model != "formula" or args.no_scope_deny
+    if variant_set and args.policy not in NEEDS_ENVELOPE:
+        parser.error("--risk-model and --no-scope-deny only apply to cascade and static_threshold")
+    variant = args.policy
+    if args.risk_model != "formula":
+        variant += f"-{args.risk_model}"
+    if args.no_scope_deny:
+        variant += "-noscope"
     k = None if args.k == "inf" else int(args.k)
     suite = get_suite(BENCHMARK_VERSION, args.suite)
-    name = pipeline_name(args.model, args.policy, k, args.seed)
+    name = pipeline_name(args.model, variant, k, args.seed)
 
     gate = None
     logger = None
@@ -145,7 +165,6 @@ def main() -> None:
         reviewer_model = args.reviewer_model or args.model
         gate_model = reviewer_model
         agent_meter = UsageMeter()
-        # runs/, decisions/ and cases/ stay side by side, e.g. under results/share/<model>/.
         out_root = Path(args.logdir).parent
         log_name = f"{name}__{args.suite}__{args.attack or 'none'}.jsonl"
         logger = DecisionLogger(
@@ -155,18 +174,23 @@ def main() -> None:
         meta = RunMeta(
             run_id=uuid.uuid4().hex[:8],
             suite=args.suite,
-            policy=args.policy,
+            policy=variant,
             k_budget=k,
             seed=args.seed,
             model_agent=args.model,
             model_gate=gate_model,
             model_reviewer=reviewer_model,
             attack_name=args.attack,
+            config_hash=CONFIG_HASH,
         )
         gate_client = build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL"))
         if args.policy in NEEDS_ENVELOPE:
             tools = [(t.name, t.description.strip().splitlines()[0]) for t in suite.tools]
-            policy = POLICIES[args.policy](EnvelopeExtractor(gate_client, gate_model, tools))
+            policy = POLICIES[args.policy](
+                EnvelopeExtractor(gate_client, gate_model, tools),
+                scorer=SCORERS[args.risk_model](),
+                scope_deny=not args.no_scope_deny,
+            )
         else:
             policy = POLICIES[args.policy]()
         gate = ApprovalGate(
@@ -180,7 +204,7 @@ def main() -> None:
 
     pipeline = build_pipeline(args.model, gate, name, seed=args.seed, agent_meter=agent_meter)
     logdir = Path(args.logdir)
-    header = f"\nsuite={args.suite} model={args.model} policy={args.policy} k={args.k} seed={args.seed}"
+    header = f"\nsuite={args.suite} model={args.model} policy={variant} k={args.k} seed={args.seed}"
 
     if args.attack is None:
         with OutputLogger(str(logdir)):
@@ -203,8 +227,7 @@ def main() -> None:
         task_ids = args.user_tasks or list(suite.user_tasks)
         utility_results: dict[tuple[str, str], bool] = {}
         security_results: dict[tuple[str, str], bool] = {}
-        # Not benchmark_suite_with_injections: it first runs every injection
-        # task as a normal task, which costs extra runs and never affects TCR.
+
         with OutputLogger(str(logdir)):
             for task_id in task_ids:
                 utility, security = run_task_with_injection_tasks(

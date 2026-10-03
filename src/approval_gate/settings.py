@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import yaml
@@ -14,3 +15,6 @@ def load(name: str) -> dict:
 
 
 POLICY = load("policy.yaml")
+CONFIG_HASH = hashlib.sha256(
+    b"".join(p.read_bytes() for p in sorted(CONFIG_DIR.glob("*.yaml")))
+).hexdigest()[:12]

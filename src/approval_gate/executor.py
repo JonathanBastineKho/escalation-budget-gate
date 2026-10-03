@@ -59,8 +59,7 @@ class GatedToolsExecutor(ToolsExecutor):
                     tool_call, "", f"Invalid tool {tool_call.function} provided."))
                 continue
 
-            # Same coercion as ToolsExecutor; done before the gate so it always
-            # sees the same argument types.
+  
             for arg_k, arg_v in tool_call.args.items():
                 if isinstance(arg_v, str) and is_string_list(arg_v):
                     tool_call.args[arg_k] = literal_eval(arg_v)
@@ -71,6 +70,7 @@ class GatedToolsExecutor(ToolsExecutor):
                 continue
 
             result, error = runtime.run_function(env, tool_call.function, tool_call.args)
+            self.gate.record_result(outcome, error)
             results.append(_tool_result_message(tool_call, self.output_formatter(result), error))
 
         return query, runtime, env, [*messages, *results], extra_args

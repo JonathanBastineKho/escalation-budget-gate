@@ -32,6 +32,7 @@ class RunMeta:
     model_gate: str
     attack_name: str | None = None
     model_reviewer: str | None = None
+    config_hash: str | None = None
 
 
 @dataclass
@@ -52,21 +53,19 @@ class DecisionRecord:
     step_index: int
 
     tool_name: str
-    tool_call_id: str | None = None  # matches tool_calls[].id in the AgentDojo run log
+    tool_call_id: str | None = None
     tool_tier: str = "unknown"
     args_hash: str = ""
     critical_args: dict = field(default_factory=dict)
 
     taint_flags: dict = field(default_factory=dict)
-    risk_features: dict = field(default_factory=dict)   # Node 3 features and the scorer used
-    envelope_deviation: float = 0.0
-    risk_R: float = 0.0
+    risk_features: dict = field(default_factory=dict)
+    envelope_deviation: float | None = None
+    risk_R: float | None = None
     harm_H: float = 0.0
-    voi: float = 0.0
-
-    tau_low: float = 0.0
-    tau_deny: float = 1.0
-    tau_esc: float = 0.0
+    voi: float | None = None
+    tau_low: float | None = None
+    tau_esc: float | None = None
     k_remaining_before: int | None = None
     decision: str = Decision.AUTO_APPROVE
     decided_by_node: str = "unset"
@@ -74,7 +73,9 @@ class DecisionRecord:
     reviewer_reason: str | None = None
     speculative_used: bool = False
     rolled_back: bool = False
-    executed: bool = True           # final outcome after an escalation resolves
+    executed: bool = True
+    tool_error: str | None = None
+    config_hash: str | None = None
 
     # component -> tokens. "agent" is the model turn that proposed this call,
     # counted on the first call of that turn only, so sums stay correct.
@@ -105,3 +106,4 @@ class CaseRecord:
     error: str | None
     tokens_in: dict
     tokens_out: dict
+    config_hash: str | None = None

@@ -87,6 +87,7 @@ class ApprovalGate:
             error=error,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            config_hash=self.meta.config_hash,
         )
         if self.logger is not None:
             self.logger.log_case(record)
@@ -198,11 +199,12 @@ class ApprovalGate:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=(time.perf_counter() - started) * 1000,
+            config_hash=self.meta.config_hash,
         )
         for key, value in ctx.features.items():
             if hasattr(record, key):
                 setattr(record, key, value)
-        if self.logger is not None:
+        if self.logger is not None and not approved:
             self.logger.log(record)
 
         self._gated_calls += 1
@@ -217,6 +219,12 @@ class ApprovalGate:
             denial_message=None if approved else self._denial_message(reviewer_reason),
             record=record,
         )
+
+    def record_result(self, outcome: GateOutcome, error: str | None) -> None:
+        """Called after an approved call has run."""
+        outcome.record.tool_error = error
+        if self.logger is not None:
+            self.logger.log(outcome.record)
 
     def _denial_message(self, reason: str | None) -> str:
         """A denial is returned to the agent as a tool error, never an abort,

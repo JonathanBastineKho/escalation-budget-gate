@@ -48,13 +48,16 @@ def extract(ctx, envelope: TaskEnvelope, memory: TaskMemory) -> RiskFeatures:
         for n, label in labels.items()
     )
     facts = memory.facts(destinations)
+
+    not_user = {n: destinations[n] for n, label in labels.items() if label != USER}
+    denied_before = memory.facts(not_user).dest_denied_before
     return RiskFeatures(
         taint=taint,
         origin=origin,
         tool_unexpected=0.5 if envelope.expected_tools is None else float(not tool_expected),
         destination_unnamed=float(unnamed),
         over_expected_writes=float(over_expected),
-        dest_denied_before=float(facts.dest_denied_before),
+        dest_denied_before=float(denied_before),
         dest_approved_before=float(facts.dest_approved_before),
         denials_so_far=facts.denials_so_far,
     )
