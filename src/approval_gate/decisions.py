@@ -88,6 +88,9 @@ class DecisionRecord:
     reviewer_mode: str | None = None
     reviewer_parse_failed: bool = False
     reviewer_assessment: dict = field(default_factory=dict)
+    reviewer_raw_response: str = ""
+    reviewer_validation_errors: list[str] = field(default_factory=list)
+    reviewer_finish_reason: str | None = None
 
 
 @dataclass

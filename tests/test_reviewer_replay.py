@@ -200,3 +200,34 @@ def test_effect_mismatch_overrides_approval_and_preserves_audit():
 def test_complete_matching_effect_can_approve_but_does_not_override_denial():
     assert _parse(json.dumps(effect_response()), strict=True) == ("APPROVE", "supported", False)
     assert _parse(json.dumps(effect_response(verdict="DENY")), strict=True)[0] == "DENY"
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ("", "empty_response"),
+    ("```json\n{}\n```", "invalid_json:"),
+    ("[]", "expected_json_object"),
+    (json.dumps({"verdict": "APPROVE", "reason": "ok"}), "missing_field: authorized_effect"),
+    (json.dumps(effect_response(effect_matches_authorization="true")),
+     "expected_boolean: effect_matches_authorization"),
+    (json.dumps(effect_response(proposed_effect=" ")), "empty_field: proposed_effect"),
+])
+def test_failed_review_retains_raw_response_and_diagnostics(payload, expected):
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kwargs: SimpleNamespace(usage=None, choices=[SimpleNamespace(
+            finish_reason="stop", message=SimpleNamespace(content=payload))]))))
+    ctx = next(load_cases(FIXTURE)).context()
+    result = SimulatedReviewer(client, "fake").review(ctx)
+    assert result.verdict == "DENY" and result.parse_failed
+    assert result.raw_response == payload
+    assert result.finish_reason == "stop"
+    assert any(error.startswith(expected) for error in result.validation_errors)
+    assert json.loads(json.dumps(asdict(result)))["raw_response"] == payload
+
+
+def test_diagnostics_do_not_treat_effect_mismatch_as_parse_failure():
+    from approval_gate.reviewer.simulated import _validation_errors
+
+    text = json.dumps(effect_response(effect_matches_authorization=False))
+    assert _validation_errors(text) == []
+    assert _parse(text, strict=True)[0] == "DENY"
+

@@ -140,6 +140,9 @@ class ApprovalGate:
         reviewer_reason = None
         reviewer_parse_failed = False
         reviewer_assessment = {}
+        reviewer_raw_response = ""
+        reviewer_validation_errors = []
+        reviewer_finish_reason = None
         tokens_in, tokens_out = self.policy.take_usage()
         agent_in, agent_out = self._agent_tokens_since_last_call()
         if agent_in or agent_out:
@@ -159,6 +162,9 @@ class ApprovalGate:
                 reviewer_reason = result.reason
                 reviewer_parse_failed = getattr(result, "parse_failed", False)
                 reviewer_assessment = getattr(result, "assessment", {})
+                reviewer_raw_response = getattr(result, "raw_response", "")
+                reviewer_validation_errors = getattr(result, "validation_errors", [])
+                reviewer_finish_reason = getattr(result, "finish_reason", None)
                 approved = result.verdict == "APPROVE"
                 node = "reviewer"
                 tokens_in["reviewer"] = result.tokens_in
@@ -208,6 +214,9 @@ class ApprovalGate:
             reviewer_mode=getattr(self.reviewer, "mode", None),
             reviewer_parse_failed=reviewer_parse_failed,
             reviewer_assessment=reviewer_assessment,
+            reviewer_raw_response=reviewer_raw_response,
+            reviewer_validation_errors=reviewer_validation_errors,
+            reviewer_finish_reason=reviewer_finish_reason,
         )
         for key, value in ctx.features.items():
             if hasattr(record, key):

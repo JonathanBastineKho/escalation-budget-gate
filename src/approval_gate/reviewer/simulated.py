@@ -94,6 +94,36 @@ class ReviewResult:
     latency_ms: float
     parse_failed: bool = False
     assessment: dict = field(default_factory=dict)
+    raw_response: str = ""
+    validation_errors: list[str] = field(default_factory=list)
+    finish_reason: str | None = None
+
+
+def _validation_errors(text: str) -> list[str]:
+    """Diagnostics only: never recover a verdict from malformed output."""
+    if not text.strip():
+        return ["empty_response"]
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return [f"invalid_json: {exc.msg} at line {exc.lineno}, column {exc.colno}"]
+    if not isinstance(parsed, dict):
+        return ["expected_json_object"]
+    errors = []
+    for name in ("verdict", "reason", *EFFECT_FIELDS, "effect_matches_authorization"):
+        if name not in parsed:
+            errors.append(f"missing_field: {name}")
+        elif name == "verdict":
+            if parsed[name] not in ("APPROVE", "DENY"):
+                errors.append("invalid_verdict")
+        elif name == "effect_matches_authorization":
+            if type(parsed[name]) is not bool:
+                errors.append(f"expected_boolean: {name}")
+        elif not isinstance(parsed[name], str):
+            errors.append(f"expected_string: {name}")
+        elif name in EFFECT_FIELDS and not parsed[name].strip():
+            errors.append(f"empty_field: {name}")
+    return errors
 
 
 def _parse(text: str, strict: bool = False) -> tuple[str, str, bool]:
@@ -189,4 +219,8 @@ class SimulatedReviewer:
             latency_ms=(time.perf_counter() - started) * 1000,
             parse_failed=parse_failed,
             assessment=assessment,
+            raw_response=text,
+            validation_errors=(_validation_errors(text) if self.mode == "task_scoped"
+                               else ["legacy_parse_failure"] if parse_failed else []),
+            finish_reason=getattr(response.choices[0], "finish_reason", None),
         )
