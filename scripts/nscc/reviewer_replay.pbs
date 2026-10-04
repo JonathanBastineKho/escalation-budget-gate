@@ -1,0 +1,27 @@
+#!/bin/bash
+#PBS -N reviewer-replay
+#PBS -q normal
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:?Submit with qsub from the repository directory}"
+
+# Require an explicit corpus: never silently run the six development cases.
+: "${REPLAY_CASES:?Set REPLAY_CASES to your frozen replay-case JSONL}"
+if [[ ! -s "$REPLAY_CASES" ]]; then
+  echo "Missing or empty replay corpus: $REPLAY_CASES"
+  exit 1
+fi
+
+export MODEL="${MODEL:-Qwen/Qwen3.5-9B}"
+export SUITE="${SUITE:-banking}"
+export SEED="${SEED:-0}"
+export VLLM_ENV="${VLLM_ENV:-/scratch/users/ntu/tejasvit/venvs/vllm-env}"
+export HF_HOME="${HF_HOME:-/scratch/users/ntu/tejasvit/hf}"
+export REPLAY_CASES
+
+# Reuse the tested environment activation, model startup and replay path.
+# PBS reads resource directives from this file; job.pbs runs as a shell script.
+exec bash scripts/nscc/job.pbs
