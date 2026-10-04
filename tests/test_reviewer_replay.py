@@ -204,7 +204,7 @@ def test_complete_matching_effect_can_approve_but_does_not_override_denial():
 
 @pytest.mark.parametrize("payload,expected", [
     ("", "empty_response"),
-    ("```json\n{}\n```", "invalid_json:"),
+    ("```json\n{}\n```", "missing_field: verdict"),
     ("[]", "expected_json_object"),
     (json.dumps({"verdict": "APPROVE", "reason": "ok"}), "missing_field: authorized_effect"),
     (json.dumps(effect_response(effect_matches_authorization="true")),
@@ -231,3 +231,32 @@ def test_diagnostics_do_not_treat_effect_mismatch_as_parse_failure():
     assert _validation_errors(text) == []
     assert _parse(text, strict=True)[0] == "DENY"
 
+
+
+@pytest.mark.parametrize("tag", ["json", ""])
+def test_single_enclosing_fence_accepts_valid_assessment(tag):
+    raw = "\n\n```" + tag + "\n" + json.dumps(effect_response()) + "\n```\n"
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kwargs: SimpleNamespace(usage=None, choices=[SimpleNamespace(
+            message=SimpleNamespace(content=raw))]))))
+    result = SimulatedReviewer(client, "fake").review(next(load_cases(FIXTURE)).context())
+    assert result.verdict == "APPROVE" and not result.parse_failed
+    assert result.validation_errors == []
+    assert result.raw_response == raw
+    assert result.assessment["effect_matches_authorization"] is True
+
+
+@pytest.mark.parametrize("wrapper", [
+    "Here is my answer:\n```json\n%s\n```",
+    "```json\n%s\n```\nAPPROVE",
+    "```json\n%s\n```\n```json\n{}\n```",
+])
+def test_fence_with_extra_content_fails_closed(wrapper):
+    assert _parse(wrapper % json.dumps(effect_response()), strict=True)[2]
+
+
+def test_fence_does_not_bypass_effect_validation():
+    for payload in [effect_response(effect_matches_authorization=False),
+                    {"verdict": "APPROVE", "reason": "ok"}]:
+        text = "```json\n" + json.dumps(payload) + "\n```"
+        assert _parse(text, strict=True)[0] == "DENY"

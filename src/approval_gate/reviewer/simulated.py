@@ -99,12 +99,20 @@ class ReviewResult:
     finish_reason: str | None = None
 
 
+def _json_payload(text: str) -> str:
+    """Accept only a whole-response JSON fence, never extract JSON from prose."""
+    stripped = text.strip()
+    fenced = re.fullmatch(r"```(?:json)?[ \t]*\r?\n(.*?)\r?\n```", stripped,
+                          flags=re.DOTALL)
+    return fenced.group(1).strip() if fenced else stripped
+
+
 def _validation_errors(text: str) -> list[str]:
     """Diagnostics only: never recover a verdict from malformed output."""
     if not text.strip():
         return ["empty_response"]
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(_json_payload(text))
     except json.JSONDecodeError as exc:
         return [f"invalid_json: {exc.msg} at line {exc.lineno}, column {exc.colno}"]
     if not isinstance(parsed, dict):
@@ -131,7 +139,7 @@ def _parse(text: str, strict: bool = False) -> tuple[str, str, bool]:
     reason says so, so parse failures can be counted in the log."""
     if strict:
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(_json_payload(text))
             if (isinstance(parsed, dict) and parsed.get("verdict") in ("APPROVE", "DENY")
                     and isinstance(parsed.get("reason"), str)
                     and all(isinstance(parsed.get(k), str) and parsed[k].strip()
@@ -206,7 +214,7 @@ class SimulatedReviewer:
         verdict, reason, parse_failed = _parse(text, strict=self.mode == "task_scoped")
         assessment = {}
         if self.mode == "task_scoped" and not parse_failed:
-            parsed = json.loads(text)
+            parsed = json.loads(_json_payload(text))
             assessment = {k: parsed[k] for k in ("scope", "evidence", *EFFECT_FIELDS,
                                                    "effect_matches_authorization") if k in parsed}
         usage = response.usage
