@@ -33,7 +33,7 @@ def _prior_actions(messages, style: str = "sanitized") -> str:
     for message in messages:
         if message.get("role") == "assistant" and message.get("tool_calls"):
             for call in message["tool_calls"]:
-                lines.append(f"called {call.function}({dict(call.args)})")
+                lines.append(f"called {call.function} with:\n{_spotlight(str(dict(call.args)), style)}")
         elif message.get("role") == "tool":
             content = message.get("content")
             if isinstance(content, list):
@@ -60,20 +60,18 @@ class ReviewResult:
 
 
 def _parse(text: str) -> tuple[str, str, bool]:
-    """Extract the verdict. An unreadable reply counts as DENY, and the
-    reason says so, so parse failures can be counted in the log."""
+    """Only a JSON object with a valid verdict counts. Anything else is DENY,
+    never guessed from prose ("do not approve" contains APPROVE)."""
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
             parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
             verdict = str(parsed.get("verdict", "")).strip().upper()
             if verdict in ("APPROVE", "DENY"):
                 return verdict, str(parsed.get("reason", ""))[:200], False
-        except json.JSONDecodeError:
-            pass
-    upper = text.upper()
-    if "APPROVE" in upper and "DENY" not in upper:
-        return "APPROVE", "recovered from unstructured output", False
     return "DENY", "reviewer output could not be parsed; failing closed", True
 
 

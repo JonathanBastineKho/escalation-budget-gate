@@ -37,3 +37,6 @@ class Policy(abc.ABC):
 
     def observe(self, ctx: CallContext, approved: bool, decided_by: str) -> None:
         """Told the final outcome, after any escalation has been resolved."""
+
+    def observe_execution(self, tool_call: FunctionCall, result, error: str | None) -> None:
+        """Told what an approved call returned once it has run."""

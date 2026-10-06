@@ -6,6 +6,7 @@ from dataclasses import asdict
 
 from approval_gate.decisions import Decision
 from approval_gate.nodes.allowlist import Tier, classify
+from approval_gate.nodes.binding import reachable, records
 from approval_gate.nodes.envelope import EnvelopeExtractor
 from approval_gate.nodes.memory import TaskMemory
 from approval_gate.nodes.risk import extract
@@ -26,6 +27,7 @@ class CascadePolicy(Policy):
 
     def start_task(self, task_id: str, user_prompt: str) -> None:
         self.memory.reset()
+        self.records: list[dict] = []
         self.envelope = self.extractor.extract(user_prompt)
         self._envelope_tokens_pending = True
 
@@ -46,7 +48,7 @@ class CascadePolicy(Policy):
         if self.memory.denied_repeat(ctx.tool_call):
             return Decision.AUTO_DENY, "memory_repeat"
 
-        f = extract(ctx, self.envelope, self.memory)
+        f = extract(ctx, self.envelope, self.memory, reachable(ctx.user_prompt, self.records))
         R = self.scorer.score(f)
         v = assess_voi(R, info.harm, f.deviation, info.tier)
         bar = self.bar(ctx)
@@ -68,3 +70,9 @@ class CascadePolicy(Policy):
     def observe(self, ctx: CallContext, approved: bool, decided_by: str) -> None:
         if decided_by != "allowlist":
             self.memory.record(ctx.tool_call, approved, decided_by)
+
+    def observe_execution(self, tool_call, result, error) -> None:
+        if error:
+            self.memory.mark_failed(tool_call)
+        else:
+            self.records += records(result)

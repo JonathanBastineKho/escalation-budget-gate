@@ -6,7 +6,7 @@ budget-exhaustion denials say nothing about the call.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from agentdojo.functions_runtime import FunctionCall
 
@@ -26,10 +26,12 @@ def _values(destinations: dict) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class Entry:
+    tool: str
     exact: tuple
     destinations: frozenset[str]
     approved: bool
     decided_by: str
+    executed: bool
 
 
 @dataclass(frozen=True)
@@ -52,7 +54,7 @@ class TaskMemory:
 
     @property
     def executed(self) -> int:
-        return sum(e.approved for e in self.entries)
+        return sum(e.executed for e in self.entries)
 
     def denied_repeat(self, call: FunctionCall) -> bool:
         """Approvals are never reused: repeating an approved write would run it twice."""
@@ -63,13 +65,25 @@ class TaskMemory:
 
     def record(self, call: FunctionCall, approved: bool, decided_by: str) -> None:
         dest = destination_args(call.function, dict(call.args))
-        self.entries.append(Entry(_exact_key(call), _values(dest), approved, decided_by))
+        self.entries.append(
+            Entry(call.function, _exact_key(call), _values(dest), approved, decided_by, approved)
+        )
 
-    def facts(self, destinations: dict) -> MemoryFacts:
+    def mark_failed(self, call: FunctionCall) -> None:
+        key = _exact_key(call)
+        for i in range(len(self.entries) - 1, -1, -1):
+            if self.entries[i].exact == key and self.entries[i].executed:
+                self.entries[i] = replace(self.entries[i], executed=False)
+                return
+
+    def facts(self, tool: str, destinations: dict) -> MemoryFacts:
         values = _values(destinations)
         reviewed = [e for e in self.entries if e.decided_by == REVIEWER]
         return MemoryFacts(
             dest_denied_before=any(not e.approved and e.destinations & values for e in reviewed),
-            dest_approved_before=any(e.approved and e.destinations & values for e in reviewed),
+            # An approval covers only the same operation and every destination in it
+            dest_approved_before=bool(values) and any(
+                e.approved and e.tool == tool and values <= e.destinations for e in reviewed
+            ),
             denials_so_far=sum(not e.approved for e in reviewed),
         )

@@ -22,6 +22,8 @@ class FormulaScorer:
             + w["tool_unexpected"] * f.tool_unexpected
             + w["destination_unnamed"] * f.destination_unnamed
             + w["over_expected_writes"] * f.over_expected_writes
+            + w["value_from_tool_output"] * f.value_from_tool_output
+            + w["target_unbound"] * f.target_unbound
             + w["dest_denied_before"] * f.dest_denied_before
             + w["dest_approved_before"] * f.dest_approved_before
             + w["per_denial"] * min(f.denials_so_far, w["denial_cap"])
