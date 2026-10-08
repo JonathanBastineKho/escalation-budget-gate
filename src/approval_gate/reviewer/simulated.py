@@ -57,6 +57,7 @@ class ReviewResult:
     tokens_out: int
     latency_ms: float
     parse_failed: bool = False
+    usage_known: bool = True
 
 
 def _parse(text: str) -> tuple[str, str, bool]:
@@ -110,4 +111,6 @@ class SimulatedReviewer:
             tokens_out=getattr(usage, "completion_tokens", 0) if usage else 0,
             latency_ms=(time.perf_counter() - started) * 1000,
             parse_failed=parse_failed,
+            usage_known=usage is not None and isinstance(getattr(usage, "prompt_tokens", None), int)
+            and isinstance(getattr(usage, "completion_tokens", None), int),
         )

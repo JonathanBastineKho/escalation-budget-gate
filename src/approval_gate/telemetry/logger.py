@@ -20,6 +20,8 @@ class DecisionLogger:
         self.decisions: Counter[str] = Counter()
         self.escalations_used = 0
         self.denied = 0
+        self.judge_unavailable = 0
+        self.judge_usage_missing = 0
         # From case records: they include the agent's final turn, which
         # per-call records miss.
         self.tokens_in: Counter[str] = Counter()
@@ -39,6 +41,8 @@ class DecisionLogger:
         self._cases_fh.flush()
         self.tokens_in.update(record.tokens_in)
         self.tokens_out.update(record.tokens_out)
+        self.judge_unavailable += record.judge_unavailable
+        self.judge_usage_missing += record.judge_usage_missing
 
     def summary(self) -> str:
         total = sum(self.decisions.values())

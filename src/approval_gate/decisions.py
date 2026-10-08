@@ -33,6 +33,7 @@ class RunMeta:
     attack_name: str | None = None
     model_reviewer: str | None = None
     config_hash: str | None = None
+    comparison_id: str | None = None
 
 
 @dataclass
@@ -71,11 +72,31 @@ class DecisionRecord:
     decided_by_node: str = "unset"
     reviewer_verdict: str | None = None
     reviewer_reason: str | None = None
+    reviewer_error: str | None = None
+    reviewer_usage_missing: int = 0
     speculative_used: bool = False
     rolled_back: bool = False
     executed: bool = True
     tool_error: str | None = None
     config_hash: str | None = None
+    comparison_id: str | None = None
+    judge_status: str | None = None
+    judge_reason: str | None = None
+    judge_diagnostics: dict = field(default_factory=dict)
+    judge_evidence: dict = field(default_factory=dict)
+    judge_allowed_labels: list[str] | None = None
+    judge_thresholds: dict = field(default_factory=dict)
+    judge_probabilities: dict = field(default_factory=dict)
+    judge_input_hash: str | None = None
+    judge_calls: int = 0
+    judge_usage_missing: int = 0
+    judge_latency_ms: float = 0.0
+    preview_status: str | None = None
+    preview_observation: str | None = None
+    preview_error: str | None = None
+    preview_calls: int = 0
+    preview_latency_ms: float = 0.0
+    preview_effects: dict | None = None
 
     # component -> tokens. "agent" is the model turn that proposed this call,
     # counted on the first call of that turn only, so sums stay correct.
@@ -107,3 +128,19 @@ class CaseRecord:
     tokens_in: dict
     tokens_out: dict
     config_hash: str | None = None
+    comparison_id: str | None = None
+    model_agent: str | None = None
+    model_gate: str | None = None
+    model_reviewer: str | None = None
+    judge_calls: int = 0
+    judge_unavailable: int = 0
+    judge_usage_missing: int = 0
+    judge_latency_ms: float = 0.0
+    preview_calls: int = 0
+    preview_failures: int = 0
+    preview_latency_ms: float = 0.0
+    gate_latency_ms: float = 0.0
+    reviewer_failures: int = 0
+    reviewer_usage_missing: int = 0
+    non_read_only_calls: int = 0
+    non_read_only_executed: int = 0

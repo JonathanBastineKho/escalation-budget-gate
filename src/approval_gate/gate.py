@@ -54,6 +54,7 @@ class ApprovalGate:
         self._escalations = 0
         self._tokens_in: Counter[str] = Counter()
         self._tokens_out: Counter[str] = Counter()
+        self._policy_costs: Counter[str] = Counter()
         # Snapshots of agent usage at case start, and at the last gated call.
         self._agent_case_start = replace(self.agent_meter)
         self._agent_mark = replace(self.agent_meter)
@@ -88,6 +89,11 @@ class ApprovalGate:
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             config_hash=self.meta.config_hash,
+            comparison_id=self.meta.comparison_id,
+            model_agent=self.meta.model_agent,
+            model_gate=self.meta.model_gate,
+            model_reviewer=self.meta.model_reviewer,
+            **self._policy_costs,
         )
         if self.logger is not None:
             self.logger.log_case(record)
@@ -122,7 +128,7 @@ class ApprovalGate:
         self.k_remaining -= 1
         return True
 
-    def decide(self, tool_call: FunctionCall, messages) -> GateOutcome:
+    def decide(self, tool_call: FunctionCall, messages, *, preview=None) -> GateOutcome:
         started = time.perf_counter()
         k_before = self.k_remaining
 
@@ -133,11 +139,14 @@ class ApprovalGate:
             messages=messages,
             step_index=self.step_index,
             k_remaining=self.k_remaining,
+            preview=preview,
         )
         decision, node = self.policy.decide(ctx)
 
         reviewer_verdict = None
         reviewer_reason = None
+        reviewer_error = None
+        reviewer_usage_missing = 0
         tokens_in: dict[str, int] = {}
         tokens_out: dict[str, int] = {}
         agent_in, agent_out = self._agent_tokens_since_last_call()
@@ -153,13 +162,25 @@ class ApprovalGate:
             elif self.reviewer is None:
                 raise RuntimeError("policy escalated but no reviewer is configured")
             else:
-                result = self.reviewer.review(ctx)
-                reviewer_verdict = result.verdict
-                reviewer_reason = result.reason
-                approved = result.verdict == "APPROVE"
                 node = "reviewer"
-                tokens_in["reviewer"] = result.tokens_in
-                tokens_out["reviewer"] = result.tokens_out
+                try:
+                    result = self.reviewer.review(ctx)
+                except Exception as exc:
+                    # The intervention was attempted and still costs budget.
+                    # Keep the judge/preview accounting even if review fails.
+                    approved = False
+                    reviewer_verdict = "DENY"
+                    reviewer_reason = "Reviewer unavailable; failing closed"
+                    reviewer_error = type(exc).__name__
+                    reviewer_usage_missing = 1
+                else:
+                    reviewer_verdict = result.verdict
+                    reviewer_reason = result.reason
+                    approved = result.verdict == "APPROVE"
+                    reviewer_error = "parse_failed" if getattr(result, "parse_failed", False) else None
+                    reviewer_usage_missing = int(not getattr(result, "usage_known", True))
+                    tokens_in["reviewer"] = result.tokens_in
+                    tokens_out["reviewer"] = result.tokens_out
         else:
             approved = decision is Decision.AUTO_APPROVE
 
@@ -195,11 +216,22 @@ class ApprovalGate:
             decided_by_node=node,
             reviewer_verdict=reviewer_verdict,
             reviewer_reason=reviewer_reason,
+            reviewer_error=reviewer_error,
+            reviewer_usage_missing=reviewer_usage_missing,
             executed=approved,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=(time.perf_counter() - started) * 1000
+            + (preview.latency_ms if preview is not None else 0.0),
             config_hash=self.meta.config_hash,
+            comparison_id=self.meta.comparison_id,
+            speculative_used=preview is not None and preview.calls > 0,
+            preview_status=preview.status if preview is not None else None,
+            preview_observation=preview.observation if preview is not None else None,
+            preview_error=preview.error if preview is not None else None,
+            preview_calls=preview.calls if preview is not None else 0,
+            preview_latency_ms=preview.latency_ms if preview is not None else 0.0,
+            preview_effects=preview.effects if preview is not None else None,
         )
         for key, value in ctx.features.items():
             if hasattr(record, key):
@@ -210,6 +242,20 @@ class ApprovalGate:
         self._gated_calls += 1
         if node == "reviewer":
             self._escalations += 1
+        self._policy_costs.update({
+            "judge_calls": record.judge_calls,
+            "judge_unavailable": int(record.judge_status not in (None, "ok")),
+            "judge_usage_missing": record.judge_usage_missing,
+            "judge_latency_ms": record.judge_latency_ms,
+            "preview_calls": record.preview_calls,
+            "preview_failures": int(record.preview_status not in (None, "ok")),
+            "preview_latency_ms": record.preview_latency_ms,
+            "gate_latency_ms": record.latency_ms,
+            "reviewer_failures": int(record.reviewer_error is not None),
+            "reviewer_usage_missing": record.reviewer_usage_missing,
+            "non_read_only_calls": int(record.tool_tier != "read_only"),
+            "non_read_only_executed": int(record.tool_tier != "read_only" and approved),
+        })
         # Agent totals come from the meter in end_case; other components add up here.
         self._tokens_in.update({c: n for c, n in tokens_in.items() if c != "agent"})
         self._tokens_out.update({c: n for c, n in tokens_out.items() if c != "agent"})
