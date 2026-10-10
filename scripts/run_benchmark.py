@@ -42,23 +42,27 @@ from approval_gate.judge_config import (
     add_judge_arguments,
     build_judge,
     comparison_manifest,
-    resolve_judge_config,
     policy_options,
+    resolve_judge_config,
 )
 from approval_gate.judging import fingerprint, tool_schema
 from approval_gate.llm import UsageMeter, build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import check_coverage
 from approval_gate.nodes.envelope import EnvelopeExtractor
-from approval_gate.nodes.scorers import FormulaScorer
+from approval_gate.nodes.scorers import DecisionScorer, FormulaScorer
 from approval_gate.policies.cascade import CascadePolicy
 from approval_gate.policies.cascade_n1 import CascadeN1Policy
 from approval_gate.policies.full_approve import FullApprovePolicy
 from approval_gate.policies.full_escalate import FullEscalatePolicy
-from approval_gate.policies.judge import DirectJudgePolicy, SandboxJudgePolicy, SandboxEffectsJudgePolicy
+from approval_gate.policies.judge import (
+    DirectJudgePolicy,
+    SandboxEffectsJudgePolicy,
+    SandboxJudgePolicy,
+)
 from approval_gate.policies.static_threshold import StaticThresholdPolicy
 from approval_gate.reviewer.simulated import SimulatedReviewer
-from approval_gate.settings import CONFIG_HASH
 from approval_gate.sandbox import AgentDojoPreview
+from approval_gate.settings import CONFIG_HASH
 from approval_gate.telemetry.logger import DecisionLogger
 
 BENCHMARK_VERSION = "v1.2.1"
@@ -75,7 +79,14 @@ POLICIES = {
 JUDGE_POLICIES = {"direct_judge", "sandbox_judge", "sandbox_effects_judge"}
 COMPARISON_POLICIES = JUDGE_POLICIES | {"full_approve", "full_escalate"}
 NEEDS_ENVELOPE = {"cascade", "static_threshold"}
-SCORERS = {"formula": FormulaScorer}
+SCORERS = {
+    "formula": lambda args: FormulaScorer(),
+    "decision": lambda args: DecisionScorer.load(
+        args.decision_revision, args.decision_device, args.decision_local_files_only),
+    "decision-nochecks": lambda args: DecisionScorer.load(
+        args.decision_revision, args.decision_device, args.decision_local_files_only,
+        include_checks=False),
+}
 
 BASE_SYSTEM_MESSAGE = load_system_message(None).rstrip("\n") + "\n  - Do not ask the user questions.\n"
 
@@ -258,7 +269,7 @@ def main() -> None:
             tools = [(t.name, t.description.strip().splitlines()[0]) for t in suite.tools]
             policy = POLICIES[args.policy](
                 EnvelopeExtractor(gate_client, gate_model, tools),
-                scorer=SCORERS[args.risk_model](),
+                scorer=SCORERS[args.risk_model](args),
                 scope_deny=not args.no_scope_deny,
             )
         else:

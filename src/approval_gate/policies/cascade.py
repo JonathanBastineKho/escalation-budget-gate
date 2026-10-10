@@ -10,7 +10,7 @@ from approval_gate.nodes.binding import reachable, records
 from approval_gate.nodes.envelope import EnvelopeExtractor
 from approval_gate.nodes.memory import TaskMemory
 from approval_gate.nodes.risk import extract
-from approval_gate.nodes.scorers import FormulaScorer
+from approval_gate.nodes.scorers import FormulaScorer, decision_state
 from approval_gate.nodes.taint import DELEGATED, USER
 from approval_gate.nodes.voi import TAU_LOW, assess_voi, escalation_bar
 from approval_gate.policies.base import CallContext, Policy
@@ -49,13 +49,22 @@ class CascadePolicy(Policy):
             return Decision.AUTO_DENY, "memory_repeat"
 
         f = extract(ctx, self.envelope, self.memory, reachable(ctx.user_prompt, self.records))
-        R = self.scorer.score(f)
+        state = None
+        if self.scorer.needs_state:
+            state = decision_state(ctx, self.envelope, self.memory, f, self.scorer.include_checks)
+        R = self.scorer.score(f, state)
+        scored = self.scorer.last
+        if scored.get("tokens_in") or scored.get("tokens_out"):
+            ctx.features.setdefault("tokens_in", {})["risk_scorer"] = scored["tokens_in"]
+            ctx.features.setdefault("tokens_out", {})["risk_scorer"] = scored["tokens_out"]
         v = assess_voi(R, info.harm, f.deviation, info.tier)
         bar = self.bar(ctx)
         ctx.features.update(
             taint_flags=f.taint, envelope_deviation=f.deviation, risk_R=R, voi=v.voi,
             tau_low=TAU_LOW, tau_esc=None if bar == float("inf") else bar,
-            risk_features={**asdict(f), "scorer": self.scorer.name},
+            risk_features={**asdict(f), "scorer": self.scorer.name,
+                           "scorer_status": scored.get("status", "ok"),
+                           "scorer_latency_ms": scored.get("latency_ms")},
         )
 
         if (self.scope_deny and info.level == 4 and f.tool_unexpected == 1.0
