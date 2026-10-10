@@ -23,10 +23,12 @@ class CallContext:
     step_index: int
     k_remaining: int | None     # None means unbounded
     features: dict = field(default_factory=dict)   # policy -> log record
+    preview: Any = None          # disposable observation/receipt; never the live runtime/environment
 
 
 class Policy(abc.ABC):
     name: str
+    requires_preview: bool = False
 
     def start_task(self, task_id: str, user_prompt: str) -> None:
         """Reset any per-task state."""

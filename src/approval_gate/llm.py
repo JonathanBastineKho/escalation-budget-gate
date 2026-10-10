@@ -85,6 +85,8 @@ def build_client(
     temperature: float = 0.0,
     meter: UsageMeter | None = None,
     base_url: str | None = None,
+    timeout: float = 1800,
+    max_retries: int = 2,
 ) -> DeterministicClient:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -92,7 +94,8 @@ def build_client(
     raw = openai.OpenAI(
         api_key=api_key,
         base_url=base_url or os.environ.get("OPENAI_BASE_URL"),
-        timeout=1800,
+        timeout=timeout,
+        max_retries=max_retries,
     )
     return DeterministicClient(raw, seed=seed, temperature=temperature, meter=meter)
 

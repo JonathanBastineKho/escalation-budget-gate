@@ -12,34 +12,27 @@ from agentdojo.agent_pipeline.tool_execution import is_string_list, tool_result_
 from agentdojo.functions_runtime import (
     EmptyEnv,
     Env,
-    FunctionCall,
     FunctionReturnType,
     FunctionsRuntime,
 )
 from agentdojo.types import ChatMessage, ChatToolResultMessage, text_content_block_from_string
 
 from approval_gate.gate import ApprovalGate
+from approval_gate.sandbox import has_nested_call
 
 
-def _tool_result_message(tool_call, content: str, error: str | None) -> ChatToolResultMessage:
-    return ChatToolResultMessage(
+def _tool_result_message(tool_call, content: str, error: str | None,
+                         execution_status: str = "not_executed") -> ChatToolResultMessage:
+    message = ChatToolResultMessage(
         role="tool",
         content=[text_content_block_from_string(content)],
         tool_call_id=tool_call.id,
         tool_call=tool_call,
         error=error,
     )
-
-
-def _has_nested_call(value) -> bool:
-    """AgentDojo runs a FunctionCall passed as an argument, which would bypass the gate."""
-    if isinstance(value, FunctionCall):
-        return True
-    if isinstance(value, dict):
-        return any(_has_nested_call(v) for v in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_has_nested_call(v) for v in value)
-    return False
+    # Local provenance for the judge; normal provider adapters select standard message fields.
+    message["gate_execution_status"] = execution_status
+    return message
 
 
 class GatedToolsExecutor(ToolsExecutor):
@@ -47,9 +40,13 @@ class GatedToolsExecutor(ToolsExecutor):
         self,
         gate: ApprovalGate,
         tool_output_formatter: Callable[[FunctionReturnType], str] = tool_result_to_str,
+        previewer=None,
     ) -> None:
         super().__init__(tool_output_formatter)
         self.gate = gate
+        self.previewer = previewer
+        if gate.policy.requires_preview and previewer is None:
+            raise ValueError("Sandbox policy requires an isolated simulator previewer")
 
     def query(
         self,
@@ -76,18 +73,20 @@ class GatedToolsExecutor(ToolsExecutor):
                     tool_call, "", f"Invalid tool {tool_call.function} provided."))
                 continue
 
-  
             for arg_k, arg_v in tool_call.args.items():
                 if isinstance(arg_v, str) and is_string_list(arg_v):
                     tool_call.args[arg_k] = literal_eval(arg_v)
 
-            if _has_nested_call(tool_call.args):
+            if has_nested_call(tool_call.args):
                 results.append(_tool_result_message(
                     tool_call, "", "Nested tool calls are not supported; submit separate calls."))
                 continue
 
             # Earlier calls in this same turn, and their results, are part of the history
-            outcome = self.gate.decide(tool_call, [*messages, *results])
+            preview = None
+            if self.gate.policy.requires_preview:
+                preview = self.previewer.preview(runtime, env, tool_call)
+            outcome = self.gate.decide(tool_call, [*messages, *results], preview=preview)
             if not outcome.approved:
                 results.append(_tool_result_message(tool_call, "", outcome.denial_message))
                 continue
@@ -95,7 +94,8 @@ class GatedToolsExecutor(ToolsExecutor):
             result, error = runtime.run_function(env, tool_call.function, tool_call.args)
             self.gate.record_result(outcome, error)
             self.gate.policy.observe_execution(tool_call, result, error)
-            results.append(_tool_result_message(tool_call, self.output_formatter(result), error))
+            results.append(_tool_result_message(tool_call, self.output_formatter(result), error,
+                                                "attempted" if error else "executed"))
 
         return query, runtime, env, [*messages, *results], extra_args
 

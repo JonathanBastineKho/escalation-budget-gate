@@ -10,6 +10,7 @@ the decision log appends, so a resumed run splits across two run_ids.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import uuid
 from pathlib import Path
@@ -37,6 +38,14 @@ import approval_gate.attacks  # noqa: F401  (registers important_instructions_ge
 from approval_gate.decisions import RunMeta
 from approval_gate.executor import GatedAgentPipeline, GatedToolsExecutor, track_cases
 from approval_gate.gate import ApprovalGate
+from approval_gate.judge_config import (
+    add_judge_arguments,
+    build_judge,
+    comparison_manifest,
+    resolve_judge_config,
+    policy_options,
+)
+from approval_gate.judging import fingerprint, tool_schema
 from approval_gate.llm import UsageMeter, build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import check_coverage
 from approval_gate.nodes.envelope import EnvelopeExtractor
@@ -45,9 +54,11 @@ from approval_gate.policies.cascade import CascadePolicy
 from approval_gate.policies.cascade_n1 import CascadeN1Policy
 from approval_gate.policies.full_approve import FullApprovePolicy
 from approval_gate.policies.full_escalate import FullEscalatePolicy
+from approval_gate.policies.judge import DirectJudgePolicy, SandboxJudgePolicy, SandboxEffectsJudgePolicy
 from approval_gate.policies.static_threshold import StaticThresholdPolicy
 from approval_gate.reviewer.simulated import SimulatedReviewer
 from approval_gate.settings import CONFIG_HASH
+from approval_gate.sandbox import AgentDojoPreview
 from approval_gate.telemetry.logger import DecisionLogger
 
 BENCHMARK_VERSION = "v1.2.1"
@@ -57,7 +68,12 @@ POLICIES = {
     "cascade_n1": CascadeN1Policy,
     "cascade": CascadePolicy,
     "static_threshold": StaticThresholdPolicy,
+    "direct_judge": DirectJudgePolicy,
+    "sandbox_judge": SandboxJudgePolicy,
+    "sandbox_effects_judge": SandboxEffectsJudgePolicy,
 }
+JUDGE_POLICIES = {"direct_judge", "sandbox_judge", "sandbox_effects_judge"}
+COMPARISON_POLICIES = JUDGE_POLICIES | {"full_approve", "full_escalate"}
 NEEDS_ENVELOPE = {"cascade", "static_threshold"}
 SCORERS = {"formula": FormulaScorer}
 
@@ -70,6 +86,7 @@ def build_pipeline(
     name: str,
     seed: int = 0,
     agent_meter: UsageMeter | None = None,
+    previewer=None,
 ) -> AgentPipeline:
     """gate=None builds stock AgentDojo; otherwise only the executor differs."""
     llm = build_llm(model, seed=seed, meter=agent_meter)
@@ -78,7 +95,7 @@ def build_pipeline(
         tools_loop = ToolsExecutionLoop([ToolsExecutor(), llm])
         pipeline = AgentPipeline([SystemMessage(BASE_SYSTEM_MESSAGE), InitQuery(), llm, tools_loop])
     else:
-        tools_loop = ToolsExecutionLoop([GatedToolsExecutor(gate), llm])
+        tools_loop = ToolsExecutionLoop([GatedToolsExecutor(gate, previewer=previewer), llm])
         pipeline = GatedAgentPipeline(
             [SystemMessage(BASE_SYSTEM_MESSAGE), InitQuery(), llm, tools_loop], gate
         )
@@ -140,6 +157,8 @@ def main() -> None:
         help="ablation: turn off Node 4's scope-rule auto-deny",
     )
     parser.add_argument("--force-rerun", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="validate and print config; no model calls")
+    add_judge_arguments(parser)
     args = parser.parse_args()
 
     load_dotenv()
@@ -153,17 +172,54 @@ def main() -> None:
         variant += f"-{args.risk_model}"
     if args.no_scope_deny:
         variant += "-noscope"
-    k = None if args.k == "inf" else int(args.k)
+    try:
+        k = None if args.k == "inf" else int(args.k)
+        if k is not None and k < 0:
+            raise ValueError()
+    except ValueError:
+        parser.error("--k must be a nonnegative integer or 'inf'")
+    if args.injection_tasks is not None and args.attack is None:
+        parser.error("--injection-tasks requires --attack")
     suite = get_suite(BENCHMARK_VERSION, args.suite)
+    for selected, available, label in (
+        (args.user_tasks, suite.user_tasks, "user"),
+        (args.injection_tasks, suite.injection_tasks, "injection"),
+    ):
+        if selected is not None and (not selected or set(selected) - set(available)):
+            parser.error(f"invalid or empty {label} task selection")
     name = pipeline_name(args.model, variant, k, args.seed)
+    config_hash = CONFIG_HASH
+    comparison_id = None
+    manifest = None
+    judge_config = None
+    previewer = None
+    if args.policy in COMPARISON_POLICIES:
+        try:
+            judge_config = resolve_judge_config(args)
+            if args.policy in JUDGE_POLICIES and POLICIES[args.policy].requires_preview:
+                previewer = AgentDojoPreview(args.suite, BENCHMARK_VERSION, args.preview_max_chars,
+                    include_effects=POLICIES[args.policy].requires_effects)
+        except (ValueError, OSError) as exc:
+            parser.error(str(exc))
+        shared = comparison_manifest(args, suite, judge_config, BENCHMARK_VERSION)
+        comparison_id = fingerprint(shared)
+        manifest = {"shared": shared, "comparison_id": comparison_id,
+                    "policy": variant, "k": k, "seed": args.seed}
+        config_hash = fingerprint(manifest)
+        name = pipeline_name(f"{args.model}-{config_hash[:12]}", variant, k, args.seed)
+    if args.dry_run:
+        print(json.dumps({"name": name, "config_hash": config_hash,
+                          "experiment": manifest}, indent=2))
+        return
 
     gate = None
     logger = None
     agent_meter = None
     if args.policy != "undefended":
-        check_coverage(t.name for t in suite.tools)
+        if args.policy not in JUDGE_POLICIES:
+            check_coverage(t.name for t in suite.tools)
         reviewer_model = args.reviewer_model or args.model
-        gate_model = reviewer_model
+        gate_model = judge_config["model"] if args.policy in JUDGE_POLICIES else reviewer_model
         agent_meter = UsageMeter()
         out_root = Path(args.logdir).parent
         log_name = f"{name}__{args.suite}__{args.attack or 'none'}.jsonl"
@@ -181,10 +237,24 @@ def main() -> None:
             model_gate=gate_model,
             model_reviewer=reviewer_model,
             attack_name=args.attack,
-            config_hash=CONFIG_HASH,
+            config_hash=config_hash,
+            comparison_id=comparison_id,
         )
-        gate_client = build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL"))
-        if args.policy in NEEDS_ENVELOPE:
+        if manifest is not None:
+            manifest_path = out_root / "manifests" / f"{meta.run_id}.json"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps({**manifest, "run_id": meta.run_id,
+                                                 "config_hash": config_hash}, indent=2) + "\n")
+        # Each intervention in a paired run is one request, including failures.
+        gate_client = build_client(args.seed, base_url=os.environ.get("REVIEWER_BASE_URL"),
+                                   max_retries=0 if args.policy in COMPARISON_POLICIES else 2)
+        if args.policy in JUDGE_POLICIES:
+            policy = POLICIES[args.policy](
+                build_judge(judge_config, args.seed),
+                schemas={t.name: tool_schema(t) for t in suite.tools},
+                **policy_options(judge_config),
+            )
+        elif args.policy in NEEDS_ENVELOPE:
             tools = [(t.name, t.description.strip().splitlines()[0]) for t in suite.tools]
             policy = POLICIES[args.policy](
                 EnvelopeExtractor(gate_client, gate_model, tools),
@@ -202,7 +272,8 @@ def main() -> None:
         )
         track_cases(suite, gate)
 
-    pipeline = build_pipeline(args.model, gate, name, seed=args.seed, agent_meter=agent_meter)
+    pipeline = build_pipeline(args.model, gate, name, seed=args.seed, agent_meter=agent_meter,
+                              previewer=previewer)
     logdir = Path(args.logdir)
     header = f"\nsuite={args.suite} model={args.model} policy={variant} k={args.k} seed={args.seed}"
 
@@ -260,6 +331,12 @@ def main() -> None:
     if logger is not None:
         print(f"\ngate: {logger.summary()}")
         logger.close()
+        if args.policy in JUDGE_POLICIES and (logger.judge_unavailable or logger.judge_usage_missing):
+            print("Judge health FAILED: "
+                  f"{logger.judge_unavailable} unavailable, "
+                  f"{logger.judge_usage_missing} missing usage. "
+                  "Logs retained; fix the judge before running more cells.")
+            raise SystemExit(2)
 
 
 if __name__ == "__main__":
