@@ -19,10 +19,12 @@ from approval_gate.policies.base import CallContext, Policy
 class CascadePolicy(Policy):
     name = "cascade"
 
-    def __init__(self, extractor: EnvelopeExtractor, scorer=None, scope_deny: bool = True) -> None:
+    def __init__(self, extractor: EnvelopeExtractor, scorer=None, scope_deny: bool = True,
+                 feature_extractor=None) -> None:
         self.extractor = extractor
         self.scorer = scorer or FormulaScorer()
         self.scope_deny = scope_deny
+        self.feature_extractor = feature_extractor   # None means the code features
         self.memory = TaskMemory()
 
     def start_task(self, task_id: str, user_prompt: str) -> None:
@@ -48,7 +50,19 @@ class CascadePolicy(Policy):
         if self.memory.denied_repeat(ctx.tool_call):
             return Decision.AUTO_DENY, "memory_repeat"
 
-        f = extract(ctx, self.envelope, self.memory, reachable(ctx.user_prompt, self.records))
+        trusted = reachable(ctx.user_prompt, self.records)
+        feature_info = {"feature_source": "code"}
+        if self.feature_extractor is None:
+            f = extract(ctx, self.envelope, self.memory, trusted)
+        else:
+            f = self.feature_extractor.extract(ctx, self.envelope, self.memory, trusted)
+            fx = self.feature_extractor.last
+            feature_info = {"feature_source": self.feature_extractor.name,
+                            "feature_status": fx.get("status"), "feature_reason": fx.get("reason"),
+                            "feature_latency_ms": fx.get("latency_ms")}
+            if fx.get("tokens_in") or fx.get("tokens_out"):
+                ctx.features.setdefault("tokens_in", {})["features"] = fx["tokens_in"]
+                ctx.features.setdefault("tokens_out", {})["features"] = fx["tokens_out"]
         state = None
         if self.scorer.needs_state:
             state = decision_state(ctx, self.envelope, self.memory, f, self.scorer.include_checks)
@@ -62,7 +76,7 @@ class CascadePolicy(Policy):
         ctx.features.update(
             taint_flags=f.taint, envelope_deviation=f.deviation, risk_R=R, voi=v.voi,
             tau_low=TAU_LOW, tau_esc=None if bar == float("inf") else bar,
-            risk_features={**asdict(f), "scorer": self.scorer.name,
+            risk_features={**asdict(f), **feature_info, "scorer": self.scorer.name,
                            "scorer_status": scored.get("status", "ok"),
                            "scorer_latency_ms": scored.get("latency_ms")},
         )

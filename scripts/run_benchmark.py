@@ -49,6 +49,7 @@ from approval_gate.judging import fingerprint, tool_schema
 from approval_gate.llm import UsageMeter, build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import check_coverage
 from approval_gate.nodes.envelope import EnvelopeExtractor
+from approval_gate.nodes.llm_features import LLMFeatureExtractor
 from approval_gate.nodes.scorers import DecisionScorer, FormulaScorer
 from approval_gate.policies.cascade import CascadePolicy
 from approval_gate.policies.cascade_n1 import CascadeN1Policy
@@ -167,6 +168,13 @@ def main() -> None:
         action="store_true",
         help="ablation: turn off Node 4's scope-rule auto-deny",
     )
+    parser.add_argument(
+        "--features",
+        default="code",
+        choices=["code", "llm"],
+        help="Node 3 feature extraction: code rules, or the reviewer model for the "
+             "features that need meaning (cascade and static_threshold)",
+    )
     parser.add_argument("--force-rerun", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="validate and print config; no model calls")
     add_judge_arguments(parser)
@@ -175,10 +183,13 @@ def main() -> None:
     load_dotenv()
     if args.attack is not None and args.attack not in ATTACKS:
         parser.error(f"unknown attack {args.attack!r}; registered: {sorted(ATTACKS)}")
-    variant_set = args.risk_model != "formula" or args.no_scope_deny
+    variant_set = args.risk_model != "formula" or args.no_scope_deny or args.features != "code"
     if variant_set and args.policy not in NEEDS_ENVELOPE:
-        parser.error("--risk-model and --no-scope-deny only apply to cascade and static_threshold")
+        parser.error("--risk-model, --features and --no-scope-deny only apply to cascade "
+                     "and static_threshold")
     variant = args.policy
+    if args.features != "code":
+        variant += f"-{args.features}feat"
     if args.risk_model != "formula":
         variant += f"-{args.risk_model}"
     if args.no_scope_deny:
@@ -271,6 +282,8 @@ def main() -> None:
                 EnvelopeExtractor(gate_client, gate_model, tools),
                 scorer=SCORERS[args.risk_model](args),
                 scope_deny=not args.no_scope_deny,
+                feature_extractor=(LLMFeatureExtractor(gate_client, gate_model)
+                                   if args.features == "llm" else None),
             )
         else:
             policy = POLICIES[args.policy]()
