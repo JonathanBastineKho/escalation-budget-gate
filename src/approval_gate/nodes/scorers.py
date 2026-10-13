@@ -102,11 +102,11 @@ class DecisionScorer:
         self.last: dict = {}
 
     @classmethod
-    def load(cls, revision: str, device: str = "cpu", local_files_only: bool = False,
-             include_checks: bool = True):
-        from approval_gate.judging import DECISION2_MODEL, Decision2Judge
+    def load(cls, model_name: str, revision: str, device: str = "cpu",
+             local_files_only: bool = False, include_checks: bool = True):
+        from approval_gate.judging import Decision2Judge
 
-        judge = Decision2Judge.load(DECISION2_MODEL, revision, device, local_files_only)
+        judge = Decision2Judge.load(model_name, revision, device, local_files_only)
         return cls(judge.model, include_checks)
 
     def score(self, f: RiskFeatures, state: dict | None = None) -> float:

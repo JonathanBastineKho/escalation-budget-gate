@@ -45,7 +45,7 @@ from approval_gate.judge_config import (
     policy_options,
     resolve_judge_config,
 )
-from approval_gate.judging import fingerprint, tool_schema
+from approval_gate.judging import DECISION2_MODEL, fingerprint, tool_schema
 from approval_gate.llm import UsageMeter, build_client, build_llm, pipeline_name
 from approval_gate.nodes.allowlist import check_coverage
 from approval_gate.nodes.envelope import EnvelopeExtractor
@@ -83,10 +83,11 @@ NEEDS_ENVELOPE = {"cascade", "static_threshold"}
 SCORERS = {
     "formula": lambda args: FormulaScorer(),
     "decision": lambda args: DecisionScorer.load(
-        args.decision_revision, args.decision_device, args.decision_local_files_only),
+        args.decision_model, args.decision_revision, args.decision_device,
+        args.decision_local_files_only),
     "decision-nochecks": lambda args: DecisionScorer.load(
-        args.decision_revision, args.decision_device, args.decision_local_files_only,
-        include_checks=False),
+        args.decision_model, args.decision_revision, args.decision_device,
+        args.decision_local_files_only, include_checks=False),
 }
 
 BASE_SYSTEM_MESSAGE = load_system_message(None).rstrip("\n") + "\n  - Do not ask the user questions.\n"
@@ -164,6 +165,11 @@ def main() -> None:
         help="Node 3 scorer that turns the features into R (cascade and static_threshold)",
     )
     parser.add_argument(
+        "--decision-model",
+        default=DECISION2_MODEL,
+        help="Decision-2 checkpoint for --risk-model decision; pass its --decision-revision too",
+    )
+    parser.add_argument(
         "--no-scope-deny",
         action="store_true",
         help="ablation: turn off Node 4's scope-rule auto-deny",
@@ -192,6 +198,8 @@ def main() -> None:
         variant += f"-{args.features}feat"
     if args.risk_model != "formula":
         variant += f"-{args.risk_model}"
+        if args.decision_model != DECISION2_MODEL:
+            variant += f"-{args.decision_model.split('/')[-1]}"
     if args.no_scope_deny:
         variant += "-noscope"
     try:
