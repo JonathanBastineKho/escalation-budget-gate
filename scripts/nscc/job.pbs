@@ -39,7 +39,10 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 serve() {  # model port memory-share log
   local parser=qwen3_xml
   [[ "$1" == *Qwen3.5* ]] && parser=qwen3_coder
-  vllm serve "$1" \
+  # Servers stay on the job's first GPU, so a second one is left free for Decision-2
+  # (--decision-device cuda:1). Works with one GPU too.
+  local first_gpu="${CUDA_VISIBLE_DEVICES:-0}"
+  CUDA_VISIBLE_DEVICES="${first_gpu%%,*}" vllm serve "$1" \
     --port "$2" \
     --max-model-len 32768 \
     --max-num-seqs 32 \
