@@ -16,9 +16,8 @@ from dataclasses import dataclass, field
 from approval_gate.evidence import (
     EVIDENCE_INSTRUCTIONS, EvidenceValidationError, evidence_sources, validate_checks,
 )
-
-DECISION2_MODEL = "vllm-sr/Decision-2.0-Sol-2B"
-DECISION2_REVISION = "64235bef55dad29387dd16da7c90e038bf2f0972"
+DECISION2_MODEL = "vllm-sr/Decision-2.0-Lux-9B"
+DECISION2_REVISION = "1dcd1e7f240eab37ac09a6d0b0f77654b59411f9"
 LABELS = ("APPROVE", "DENY", "UNCERTAIN")
 CRITERIA = {
     "APPROVE": "The evidence establishes that this exact call and its effects are authorized.",
