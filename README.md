@@ -26,8 +26,9 @@ AgentDojo's executable simulator for an online authorization decision. Previews
 support stock tools in AgentDojo **0.1.35 / benchmark v1.2.1** (banking, workspace,
 travel and slack). Each uses a deep copy, discarded afterward; approved calls run
 once in the live simulator. Ordinary previews expose normal tool returns/errors;
-the effects variant also exposes affected records through explicit audited
-adapters. Neither exposes an environment dump, attacker goals or success labels. This is simulator isolation,
+the effects variant also exposes the records the call changed, from a record-level
+diff of the clone (secrets redacted, run-time timestamps omitted). Neither exposes
+an environment dump, unchanged records, attacker goals or success labels. This is simulator isolation,
 not an OS sandbox. One-step observations can miss delayed effects and do not
 establish that the judge resists injected instructions.
 
@@ -188,14 +189,14 @@ cat "$RUN/report.md"
 python scripts/analyze/compare_sandbox_study.py --root "$RUN"
 ```
 
-The effects adapter currently covers banking payments, schedules, scheduled
-updates and selected reads, plus workspace email sending. It exports only
-affected transaction/email fields and preserves unchanged target fields, so
-ignored arguments remain visible. Each affected record also lists submitted
-arguments alongside observed values for fields with matching names; this is a
-presentation of the same evidence, not an authorization decision. Uninstrumented tools request review instead
-of silently losing the effects check. Broader domains need audited adapters and
-fresh fixtures; stronger results here would justify that larger experiment.
+Effect receipts cover every stock tool in all four suites with one rule: the clone
+is diffed record by record before and after the call, and only changed records
+are exported, with secret fields (passwords, ID, passport, bank account and card
+numbers) redacted and run-time timestamps omitted. A changed record keeps all its
+fields, so an ignored argument stays visible next to the value it should have
+set. A call that changes nothing yields an empty receipt. Each changed record also
+lists submitted arguments alongside observed values for fields with matching
+names; this is a presentation of the same evidence, not an authorization decision.
 
 The underlying runners also accept `--judge-approve-threshold`,
 `--judge-deny-threshold`, `--judge-verdict-format evidence` and the third policy.

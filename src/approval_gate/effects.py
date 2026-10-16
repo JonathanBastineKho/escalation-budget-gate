@@ -1,66 +1,93 @@
-"""Audited effect receipts for a small subset of stock AgentDojo tools.
+"""Effect receipts for stock AgentDojo tools.
 
 Receipts describe affected records, not risk scores or benchmark ground truth.
-Only these adapters may inspect the cloned simulator state. They never export
-the whole environment, passwords, unrelated records, or evaluation metadata.
+One rule covers every tool: diff the cloned simulator state record by record and
+export only records the call changed. Secret fields are redacted and run-time
+timestamps dropped. Unchanged and unrelated records, and evaluation metadata,
+are never exported.
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 
-TRANSACTION_FIELDS = ("id", "sender", "recipient", "amount", "subject", "date", "recurring")
-EMAIL_FIELDS = ("id_", "sender", "recipients", "cc", "bcc", "subject", "body", "attachments", "status")
-BANK_READS = {"get_iban", "get_balance", "get_most_recent_transactions",
-              "get_scheduled_transactions", "read_file"}
+from pydantic import BaseModel
+from pydantic_core import to_jsonable_python
+
+SECRET_FIELDS = {"password", "id_number", "passport_number", "bank_account_number",
+                 "credit_card_number"}
+# Set from the wall clock by the simulator, so they would make identical calls look different.
+VOLATILE_FIELDS = {"timestamp", "last_modified"}
 
 
 def effect_snapshot(suite: str, env, call) -> dict:
-    """Capture only the collections/target that an audited stock tool can affect."""
-    tool = call.function
-    if suite == "banking" and tool in BANK_READS:
-        return {"resource": "none", "scope": "Audited stock read; no simulator writes.",
-                "records": {}}
-    if suite == "banking" and tool in {
-        "send_money", "schedule_transaction", "update_scheduled_transaction"
-    }:
-        scheduled = tool != "send_money"
-        records = (env.bank_account.scheduled_transactions if scheduled
-                   else env.bank_account.transactions)
-        if tool == "update_scheduled_transaction":
-            records = [r for r in records if r.id == call.args["id"]]
-        return {
-            "resource": "scheduled_transaction" if scheduled else "transaction",
-            "scope": "Affected transaction records; fields also exposed by the account's read tools.",
-            "records": {str(r.id): {k: r.model_dump(mode="json")[k] for k in TRANSACTION_FIELDS}
-                        for r in records},
-        }
-    if suite == "workspace" and tool == "send_email":
-        records = env.inbox.emails.values()
-        return {
-            "resource": "email",
-            "scope": "Affected email records; timestamps and unrelated mailbox contents omitted.",
-            "records": {str(r.id_): {k: r.model_dump(mode="json")[k] for k in EMAIL_FIELDS}
-                        for r in records},
-        }
-    raise ValueError(f"No audited effect adapter for {suite}/{tool}")
+    records: dict[str, dict] = {}
+    _flatten(env, "", records)
+    return {"resource": "environment",
+            "scope": "Records changed by this call only; secret fields redacted, timestamps omitted.",
+            "records": records}
+
+
+def _json(value):
+    if isinstance(value, (set, frozenset)):
+        return sorted(to_jsonable_python(value), key=str)
+    return to_jsonable_python(value)
+
+
+def _plain(value) -> bool:
+    if isinstance(value, (BaseModel, dict)):
+        return False
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return all(_plain(v) for v in value)
+    return True
+
+
+def _flatten(obj, path: str, out: dict) -> None:
+    """One record per model object; dict entries and list items of models get their own path."""
+    if isinstance(obj, BaseModel):
+        fields = {}
+        for name in type(obj).model_fields:
+            if name.lower() in VOLATILE_FIELDS:
+                continue
+            value = getattr(obj, name)
+            if _plain(value):
+                fields[name] = _json(value)
+            else:
+                _flatten(value, f"{path}.{name}" if path else name, out)
+        if fields:
+            out[path or "environment"] = fields
+        return
+    items = obj.items() if isinstance(obj, dict) else enumerate(obj)
+    for key, value in items:
+        child = f"{path}[{key}]"
+        if _plain(value):
+            out[child] = {"value": _json(value)}
+        else:
+            _flatten(value, child, out)
+
+
+def _redact(record: dict | None, other: dict | None) -> dict | None:
+    if record is None:
+        return None
+    return {k: ("[redacted, changed]" if other is not None and other.get(k) != v else "[redacted]")
+            if k.lower() in SECRET_FIELDS else deepcopy(v)
+            for k, v in record.items()}
 
 
 def effect_receipt(before: dict, after: dict, call) -> dict:
-    """Retain unchanged target fields too: an ignored argument can be consequential."""
     records = []
-    include_unchanged = call.function == "update_scheduled_transaction"
     for key in sorted(before["records"].keys() | after["records"].keys()):
         old, new = before["records"].get(key), after["records"].get(key)
-        if old == new and not include_unchanged:
+        if old == new:
             continue
-        change = ("created" if old is None else "deleted" if new is None
-                  else "unchanged" if old == new else "updated")
+        change = "created" if old is None else "deleted" if new is None else "updated"
         records.append({"resource": before["resource"], "id": key, "change": change,
-                        "before": deepcopy(old), "after": deepcopy(new),
-                        # Same-name fields of an audited record only. These are
+                        "before": _redact(old, new), "after": _redact(new, old),
+                        # Same-name fields of a changed record only. These are
                         # observations, not authorization scores or mismatch vetoes.
                         "argument_observations": [
+                            {"field": field, "submitted": "[redacted]", "observed_after": "[redacted]"}
+                            if field.lower() in SECRET_FIELDS else
                             {"field": field, "submitted": deepcopy(call.args[field]),
                              "observed_after": deepcopy(new[field])}
                             for field in sorted(call.args.keys() & (new or {}).keys())

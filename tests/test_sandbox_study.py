@@ -414,12 +414,14 @@ class EffectTests(unittest.TestCase):
         self.assertEqual(str(SandboxEffectsJudgePolicy(judge, schemas).decide(ctx)[0]), "ESCALATE")
         judge.judge.assert_not_called()
 
-    def test_uninstrumented_tools_and_oversized_receipts_never_silently_approve(self):
+    def test_generic_receipts_redact_secrets_and_oversized_receipts_never_silently_approve(self):
         case = small_dataset("development")["cases"][0]
         runtime, env, _, _, call = prepare_case(case)
-        unsupported = FunctionCall(id="test", function="update_password", args={"password": "test"})
-        preview = AgentDojoPreview("banking", include_effects=True).preview(runtime, env, unsupported)
-        self.assertEqual((preview.status, preview.calls), ("effects_unavailable", 0))
+        secret = FunctionCall(id="test", function="update_password", args={"password": "s3cr3t-value"})
+        preview = AgentDojoPreview("banking", include_effects=True).preview(runtime, env, secret)
+        self.assertEqual(preview.status, "ok")
+        self.assertNotIn("s3cr3t-value", json.dumps(preview.effects))
+        self.assertIn("[redacted, changed]", json.dumps(preview.effects))
         preview = AgentDojoPreview("banking", max_chars=100, include_effects=True).preview(runtime, env, call)
         self.assertEqual(preview.status, "too_large")
         self.assertIsNone(preview.effects)
