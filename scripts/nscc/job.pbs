@@ -37,6 +37,12 @@ echo "attack: ${ATTACK:-none}  injection tasks: ${INJ:-all}  user tasks: ${USER_
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
 serve() {  # model port memory-share log
+  # Ports stay fixed because endpoint URLs are part of the comparison ID. Another job
+  # on this node already holding the port would silently serve this job's requests.
+  if curl -sf "localhost:$2/v1/models" > /dev/null; then
+    echo "port $2 is already served by another job on $(hostname); resubmit this job"
+    exit 3
+  fi
   local parser=qwen3_xml
   [[ "$1" == *Qwen3.5* ]] && parser=qwen3_coder
   # Servers stay on the job's first GPU, so a second one is left free for Decision-2
@@ -58,10 +64,10 @@ serve() {  # model port memory-share log
 
 wait_ready() {  # port log
   for _ in $(seq 1 180); do
-    curl -sf "localhost:$1/v1/models" > /dev/null && return 0
     if ! kill -0 "$LAST_PID" 2>/dev/null; then
       echo "vLLM on port $1 exited during startup"; tail -40 "$2"; return 1
     fi
+    curl -sf "localhost:$1/v1/models" > /dev/null && kill -0 "$LAST_PID" 2>/dev/null && return 0
     sleep 10
   done
   echo "vLLM on port $1 not ready"; tail -40 "$2"; return 1
