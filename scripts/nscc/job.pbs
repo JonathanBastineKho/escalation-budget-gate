@@ -24,10 +24,18 @@ export PATH="$HOME/vllm-env/bin:$PATH"
 export HF_HOME="$SCRATCH_DIR/hf"
 export HF_HUB_OFFLINE=1
 export VLLM_USE_FLASHINFER_SAMPLER=0
-export OPENAI_BASE_URL=http://localhost:8000/v1
-export OPENAI_API_KEY=EMPTY
 
 JOB="${PBS_JOBID%%.*}"
+# Endpoint URLs are part of the judge/baseline comparison ID, so those runs keep the fixed
+# ports. PORTS=job derives ports from the job ID; safe for cascade runs, which hash no URL.
+AGENT_PORT=8000
+REVIEWER_PORT=8001
+if [ "${PORTS:-fixed}" = job ]; then
+  AGENT_PORT=$((20000 + JOB % 20000 * 2))
+  REVIEWER_PORT=$((AGENT_PORT + 1))
+fi
+export OPENAI_BASE_URL="http://localhost:$AGENT_PORT/v1"
+export OPENAI_API_KEY=EMPTY
 LOGDIR=results/nscc
 mkdir -p "$LOGDIR"
 
@@ -37,8 +45,7 @@ echo "attack: ${ATTACK:-none}  injection tasks: ${INJ:-all}  user tasks: ${USER_
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 
 serve() {  # model port memory-share log
-  # Ports stay fixed because endpoint URLs are part of the comparison ID. Another job
-  # on this node already holding the port would silently serve this job's requests.
+  # Another job on this node already holding the port would silently serve our requests.
   if curl -sf "localhost:$2/v1/models" > /dev/null; then
     echo "port $2 is already served by another job on $(hostname); resubmit this job"
     exit 3
@@ -77,14 +84,14 @@ SERVER_PIDS=()
 trap 'kill "${SERVER_PIDS[@]}" 2>/dev/null' EXIT
 REVIEWER_ARGS=()
 if [ "$REVIEWER_MODEL" = "$MODEL" ]; then
-  serve "$MODEL" 8000 0.92 "$LOGDIR/vllm_$JOB.log"
-  wait_ready 8000 "$LOGDIR/vllm_$JOB.log" || exit 1
+  serve "$MODEL" "$AGENT_PORT" 0.92 "$LOGDIR/vllm_$JOB.log"
+  wait_ready "$AGENT_PORT" "$LOGDIR/vllm_$JOB.log" || exit 1
 else
-  serve "$REVIEWER_MODEL" 8001 "$REVIEWER_MEM" "$LOGDIR/vllm_reviewer_$JOB.log"
-  wait_ready 8001 "$LOGDIR/vllm_reviewer_$JOB.log" || exit 1
-  serve "$MODEL" 8000 "$AGENT_MEM" "$LOGDIR/vllm_agent_$JOB.log"
-  wait_ready 8000 "$LOGDIR/vllm_agent_$JOB.log" || exit 1
-  export REVIEWER_BASE_URL=http://localhost:8001/v1
+  serve "$REVIEWER_MODEL" "$REVIEWER_PORT" "$REVIEWER_MEM" "$LOGDIR/vllm_reviewer_$JOB.log"
+  wait_ready "$REVIEWER_PORT" "$LOGDIR/vllm_reviewer_$JOB.log" || exit 1
+  serve "$MODEL" "$AGENT_PORT" "$AGENT_MEM" "$LOGDIR/vllm_agent_$JOB.log"
+  wait_ready "$AGENT_PORT" "$LOGDIR/vllm_agent_$JOB.log" || exit 1
+  export REVIEWER_BASE_URL="http://localhost:$REVIEWER_PORT/v1"
   REVIEWER_ARGS=(--reviewer-model "$REVIEWER_MODEL")
 fi
 echo "vLLM ready"
@@ -92,8 +99,8 @@ grep -h "KV cache" "$LOGDIR"/vllm*_"$JOB".log | tail -4
 
 if ! .venv/bin/python -c "
 import os, openai
-for url, model in {('http://localhost:8000/v1', '$MODEL'),
-                   (os.environ.get('REVIEWER_BASE_URL', 'http://localhost:8000/v1'), '$REVIEWER_MODEL')}:
+for url, model in {(os.environ['OPENAI_BASE_URL'], '$MODEL'),
+                   (os.environ.get('REVIEWER_BASE_URL', os.environ['OPENAI_BASE_URL']), '$REVIEWER_MODEL')}:
     m = openai.OpenAI(base_url=url).chat.completions.create(
         model=model, messages=[{'role': 'user', 'content': 'say ok'}], max_tokens=20)
     print('probe', model, repr(m.choices[0].message.content))
