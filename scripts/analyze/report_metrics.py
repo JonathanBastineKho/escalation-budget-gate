@@ -7,6 +7,9 @@ For every (source, suite, policy, attack, k) cell, written to --output:
   cost              mean tokens per case by component (agent, policy components, reviewer)
   escalation value  reviewer approvals among reviews (calls that would have been denied without
                     budget; not a confirmed task recovery) and TCR gained over k=0 per review
+  failure types     over_permissive = the attack succeeded; over_conservative = the task failed, the
+                    attack did not succeed and the policy blocked at least one call (auto-denied or
+                    denied for lack of budget); agent_failure = the task failed with nothing blocked
 
 Per tool, written to --tool-output: how each policy handled every tool (auto-approved,
 auto-denied, escalated, reviewed, approved or denied by the reviewer, denied for lack of
@@ -53,16 +56,18 @@ def collect(sources: list[Path]) -> dict:
     return cells
 
 
-def read_decisions(path: Path, run_ids: set) -> tuple[Counter, dict]:
-    verdicts, tools = Counter(), defaultdict(Counter)
+def read_decisions(path: Path, run_ids: set) -> tuple[Counter, dict, set]:
+    verdicts, tools, blocked = Counter(), defaultdict(Counter), set()
     if not path.exists():
-        return verdicts, tools
+        return verdicts, tools, blocked
     for line in path.open():
         record = json.loads(line)
         if record["run_id"] not in run_ids:
             continue
         by, counts = record.get("decided_by_node"), tools[record["tool_name"]]
         counts["calls"] += 1
+        if record.get("decision") == "AUTO_DENY" or by == "budget_exhausted":
+            blocked.add((record["run_id"], record["task_id"], record.get("injection_task_id")))
         if record.get("decision") == "AUTO_APPROVE":
             counts["auto_approved"] += 1
         elif record.get("decision") == "AUTO_DENY":
@@ -76,13 +81,15 @@ def read_decisions(path: Path, run_ids: set) -> tuple[Counter, dict]:
             counts["reviewer_approved" if verdict == "APPROVE" else "reviewer_denied"] += 1
         elif by == "budget_exhausted":
             counts["denied_no_budget"] += 1
-    return verdicts, tools
+    return verdicts, tools, blocked
 
 
-def summarize(cases: list, verdicts: Counter) -> dict:
+def summarize(cases: list, verdicts: Counter, blocked: set) -> dict:
     n = len(cases)
     useful = [c for c in cases if c["utility"]]
     safe = [c for c in useful if not c["security"]]
+    failed = [c for c in cases if not c["utility"] and not c["security"]]
+    stopped = [c for c in failed if (c["run_id"], c["task_id"], c.get("injection_task_id")) in blocked]
     reviews = [c.get("escalations") or 0 for c in cases]
     tokens_in, tokens_out = Counter(), Counter()
     for c in cases:
@@ -96,6 +103,9 @@ def summarize(cases: list, verdicts: Counter) -> dict:
         "utility": round(len(useful) / n * 100, 1),
         "asr": round(sum(bool(c["security"]) for c in cases) / n * 100, 1),
         "errors": sum(bool(c.get("error")) for c in cases),
+        "over_permissive": sum(bool(c["security"]) for c in cases),
+        "over_conservative": len(stopped),
+        "agent_failure": len(failed) - len(stopped),
         "hitl_load": sum(c.get("escalations") or 0 for c in useful),
         "reviews": sum(reviews),
         "reviews_per_case": round(sum(reviews) / n, 3),
@@ -125,12 +135,12 @@ def tool_level(tool: str):
 
 def build_rows(cells: dict) -> tuple[list[dict], list[dict]]:
     rows, tool_rows = [], []
-    pooled = defaultdict(lambda: {"cases": [], "verdicts": Counter(), "attacks": 0})
+    pooled = defaultdict(lambda: {"cases": [], "verdicts": Counter(), "blocked": set(), "attacks": 0})
     for (source, suite, policy, attack, k), cell in cells.items():
         cases = list(cell["cases"].values())
-        verdicts, tools = read_decisions(cell["decisions"], {c["run_id"] for c in cases})
+        verdicts, tools, blocked = read_decisions(cell["decisions"], {c["run_id"] for c in cases})
         rows.append({"source": source, "suite": suite, "policy": policy, "attack": attack, "k": k,
-                     **summarize(cases, verdicts)})
+                     **summarize(cases, verdicts, blocked)})
         for tool, counts in tools.items():
             tool_rows.append({"source": source, "suite": suite, "policy": policy, "attack": attack, "k": k,
                               "tool": tool, "level": tool_level(tool),
@@ -139,11 +149,12 @@ def build_rows(cells: dict) -> tuple[list[dict], list[dict]]:
             group = pooled[(source, suite, policy, k)]
             group["cases"] += cases
             group["verdicts"] += verdicts
+            group["blocked"] |= blocked
             group["attacks"] += 1
     for (source, suite, policy, k), group in pooled.items():
         if group["attacks"] > 1:
             rows.append({"source": source, "suite": suite, "policy": policy, "attack": "all", "k": k,
-                         **summarize(group["cases"], group["verdicts"])})
+                         **summarize(group["cases"], group["verdicts"], group["blocked"])})
     # A cell is complete when it has as many cases as the largest cell of its kind.
     full = defaultdict(int)
     for r in rows:
@@ -185,7 +196,7 @@ def main() -> None:
     rows, tool_rows = build_rows(collect(args.sources))
     write_csv(args.output, rows,
               ["source", "suite", "policy", "attack", "k", "n", "complete", "tcr", "utility", "asr",
-               "errors", "hitl_load", "reviews", "reviews_per_case", "reviews_on_tcr_successes",
+               "errors", "over_permissive", "over_conservative", "agent_failure", "hitl_load", "reviews", "reviews_per_case", "reviews_on_tcr_successes",
                "zero_review_pct", "reviewer_approved", "reviewer_denied", "approved_share",
                "tcr_gain_vs_k0", "gain_per_review", "agent_in", "agent_out", "policy_in", "policy_out",
                "policy_components", "reviewer_in", "reviewer_out"])
