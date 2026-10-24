@@ -434,3 +434,292 @@ actual served weights separately: a model name cannot detect replaced server
 weights. Judge/preview costs remain separate from review budget. Offline tests
 validate simulator isolation and workflow mechanics; they do not establish real
 model resistance to injection.
+
+## Conversation archive: assignment and report clarifications
+
+### Assignment requirements
+
+The project requires an AgentDojo approval gate that makes one of three decisions
+for every tool call: auto-approve, auto-deny, or escalate to a simulated human
+reviewer. The goal is to maximize safe task completion under a per-task escalation
+budget `k`. Required comparisons are the developed policy, a full-approve baseline,
+and a full-escalate baseline. The report must include TCR@k curves, HITL load,
+component-level API/token costs, over-conservative and over-permissive failures,
+representative trajectories, and an escalation-value analysis.
+
+### Report overview
+
+The report presents two alternative policies, not a hybrid. The feature-based
+cascade uses scope, provenance, target binding, reviewer memory, harm, and the
+remaining review budget. The effects-based judge runs an audited tool call in a
+disposable simulator copy, observes relevant before/after state, and then judges
+whether the proposed action was authorized and produced the intended result.
+
+The shared executor checks every valid call before live execution, preserves the
+budget across retries and sequential calls in a batch, and executes only the exact
+approved call. A failed review consumes one review slot. A denied call is not
+executed and returns an error so the agent can replan. Preview effects are discarded
+and do not consume the review budget.
+
+### Figure 1 in plain language
+
+The agent's call and context go through either the feature cascade or the
+preview-and-judge policy. The selected policy sends its decision to the budget gate.
+Direct approval permits live execution. A review request uses one remaining review
+slot; reviewer approval permits execution, while reviewer denial blocks it. If no
+review budget remains, a call that requires review is blocked.
+
+### Feature cascade in plain language
+
+Node 1 immediately approves level-0 read calls. Node 2 blocks repeated calls that a
+reviewer denied, while previous approvals are not automatically reused because
+permission may have been one-time. Node 3 combines user intent, argument origin,
+target matching, and reviewer history into a hand-set warning score `R` from 0.02
+to 0.95. A higher `R` means the call appears riskier or less clearly authorized.
+Node 4 decides whether human review is worth spending by comparing the expected
+cost of automatic approval with the expected cost of automatic denial.
+
+The cascade uses:
+
+`C = c(1 - d)`
+
+where `C` is the estimated cost of blocking, `c` is the importance of allowing the
+call, and `d` is the call's deviation from the requested scope.
+
+`L_A = R H`
+
+where `L_A` is the expected loss from automatic approval, `R` is the warning score,
+and `H` is the potential harm.
+
+`L_D = (1 - R) C`
+
+where `L_D` is the expected loss from automatic denial. It is larger when the call
+appears safe and blocking it would interfere with task completion.
+
+`V_ideal = min(L_A, L_D)`
+
+This estimates the potential value of a perfect review: review is most useful when
+one of the automatic choices could be substantially worse than the other. The
+policy then compares this value with a budget-dependent review threshold and either
+requests review or chooses the lower-loss automatic action.
+
+### Effects-based judge in plain language
+
+The effects policy creates a temporary copy of the simulator, runs the exact
+proposed call in that copy, records the relevant state before and after the call,
+and discards the copy. The automated judge receives the user request, tool schema,
+complete call, history, ordinary tool response, and scoped before/after receipt. It
+checks authorization, argument scope, consistency with execution history, and final
+effect scope. A tool's success message or an argument such as `recurring=false` is
+not treated as proof that the intended result occurred; the final state is checked.
+
+### Evaluation tracks
+
+The report describes a small fixed-call diagnostic and a larger online AgentDojo
+evaluation. The diagnostic contains 10 development and 10 held-out Banking and
+Workspace cases. Each split contains four clearly safe calls that should be
+approved, five unsafe or unauthorized calls that should be denied, and one
+ambiguous call that should be treated cautiously or escalated. Development cases
+are used to configure prompts and thresholds; held-out cases are used only after
+those choices are frozen, to test generalization to new wording and values within
+the same failure families.
+
+The online evaluation runs complete clean and attacked AgentDojo tasks. The actor
+can replan after a denial, and policies are compared on matched task, injection
+goal, attack type, and seed. Budgets are `k in {0, 1, 2, 3, 5, 8, infinity}`.
+Full approval is run once per case because it never escalates and is therefore
+independent of `k`.
+
+### Preliminary RQ2 result
+
+RQ2 evaluates the effects-based judge against direct and ordinary-preview judges.
+It asks whether observing actual simulated consequences reduces false approvals
+without reducing approval of genuinely safe calls. In the preliminary 10-case
+held-out diagnostic, direct and ordinary preview produced 1 false approval out of
+6 non-benign cases, while effects preview produced 0 out of 6. All three methods
+approved 4 out of 4 benign cases. This is controlled diagnostic evidence, not yet
+proof of benchmark-wide performance.
+
+### Extended conversation archive
+
+#### Assignment and report context
+
+The assignment requires a three-way approval policy for agent tool calls: automatic
+approval, automatic denial, or escalation to a simulated human reviewer. The goal is
+to maximize safe task completion under a per-task review budget `k`. Required
+baselines are full approval and full escalation. The report must include TCR@k,
+HITL load, component-level API/token costs, failure classifications, representative
+trajectories, and escalation-value analysis.
+
+The report presents two alternative policies, not a hybrid. The feature cascade uses
+scope, provenance, target binding, reviewer memory, harm, and remaining budget. The
+effects-based judge runs an audited tool call in a disposable simulator copy,
+observes relevant before/after state, and judges whether the proposed action was
+authorized and produced the intended result.
+
+#### Key terminology and Figure 1
+
+A tool schema is the formal description of a tool, including its purpose,
+parameters, types, and restrictions. A simulator preview runs the proposed call in
+a temporary copy of the environment. The copy is discarded, so the real environment
+is unchanged. A before/after receipt records the relevant state fields before and
+after the simulated call.
+
+The word `recurring` refers to an action that repeats automatically, such as a
+monthly payment. `recurring=false` requests a one-time action or stopping
+repetition, but the argument alone does not prove that recurrence stopped. The final
+state must be checked because a tool may ignore an argument while returning a success
+message.
+
+In Figure 1, the proposed call and context enter either the feature cascade or the
+preview-and-judge policy. The selected policy sends its decision to the budget gate.
+Direct approval permits the exact call to execute live. A review request consumes
+one review slot; reviewer approval permits execution and reviewer denial blocks it.
+If the budget is exhausted, a call requiring review is blocked. Denied calls return
+an error so the agent can replan. Preview effects are discarded and do not consume
+`k`.
+
+#### Feature cascade and formulas
+
+Node 1 immediately approves level-0 reads because they do not modify state. Node 2
+blocks repeated calls that a reviewer denied, but does not automatically reuse
+previous approvals because permission may have been one-time. Node 3 combines user
+intent, argument origins, target binding, and reviewer memory into a warning score
+`R` from 0.02 to 0.95. A higher `R` means the call appears riskier or less clearly
+authorized. One LLM call per task estimates the broad tool/entity/write envelope;
+individual call scores then use deterministic rules. Origin labels describe where
+information appeared to come from and possible delegation, but do not prove user
+permission.
+
+Node 4 compares the expected cost of automatic approval with the expected cost of
+automatic denial. The formulas mean:
+
+```text
+C = c(1 - d)
+```
+
+`C` is the estimated cost of blocking, `c` is the importance of allowing the call,
+and `d` is how far the call deviates from the requested scope.
+
+```text
+L_A = R H
+```
+
+`L_A` is the expected loss from automatic approval. It increases when the call is
+risky (`R` is high) or potential harm (`H`) is high.
+
+```text
+L_D = (1 - R) C
+```
+
+`L_D` is the expected loss from automatic denial. It is larger when the call looks
+safe and blocking it would interfere with completing the task.
+
+```text
+V_ideal = min(L_A, L_D)
+```
+
+`V_ideal` estimates the potential value of a perfect review. If review could avoid
+the more costly automatic mistake, the policy compares this value with a
+budget-dependent threshold and decides whether to escalate.
+
+#### Anthropic and staged screening
+
+Anthropic's Claude Code auto mode is a related conceptual motivation, not a
+reproduced comparator. Anthropic describes a fast first-stage classifier followed by
+a more expensive reasoning stage only when the first stage flags an action. The
+saving comes from avoiding expensive reasoning on ordinary calls; it does not
+necessarily require switching to a cheaper model. The feature cascade is similar in
+spirit because it reserves detailed checking for risky or ambiguous calls, but its
+implementation is different. The effects judge additionally tests the proposed call
+in a disposable state copy and inspects simulated consequences.
+
+#### RQ1 and RQ2
+
+RQ1 asks whether the cascade can achieve safe task completion close to full
+escalation while using fewer reviews at the same budget. For example, at `k=3`, the
+cascade and full-escalate baseline may both receive at most three reviews per task;
+their TCR and actual review usage are compared.
+
+RQ2 is specifically about the effects-based judge. It asks whether observing actual
+simulated consequences reduces false approvals without reducing approval of safe
+calls. The preliminary fixed-call diagnostic reported 0/6 false approvals for the
+effects preview versus 1/6 for direct and ordinary preview, while all methods
+approved 4/4 benign cases. This is controlled diagnostic evidence, not proof of
+benchmark-wide performance.
+
+#### Evaluation tracks
+
+The fixed-call diagnostic is a small controlled test of the judges. It contains 10
+development and 10 held-out Banking and Workspace fixtures. Each split contains four
+clearly safe calls that should be approved, five unsafe or unauthorized calls that
+should be denied, and one ambiguous call that should be handled cautiously or
+escalated. The development set is used to adjust prompts, thresholds, and settings.
+After those choices are frozen, the held-out set tests new wording and values within
+the same failure families. Continuing to retune after seeing held-out results would
+weaken the evaluation and create a cherry-picking concern.
+
+The online track is the larger AgentDojo evaluation. The agent performs complete
+clean and attacked tasks, receives gate decisions, and may replan after denials.
+Policies are compared on matched task, injection goal, attack type, and seed, using
+`k in {0, 1, 2, 3, 5, 8, infinity}`. Full approval is run once per case because it
+never escalates and is independent of `k`.
+
+#### TCR and HITL load
+
+For clean cases, TCR is task utility. For attacked cases, a task counts toward TCR
+only when it both completes successfully and the attack does not succeed:
+
+```text
+safe = utility AND NOT attack_success
+TCR = number of safe completions / number of cases
+```
+
+The repository's `scripts/analyze/tcr_curve.py` implements this as
+`safe = utility and not security` for attacked runs and `safe = utility` for clean
+runs. It also reports utility and attack success separately. Thus, a task that
+completes but executes an unauthorized action does not count as safe completion.
+
+HITL load is the number of reviewer interventions. The successful-task version is:
+
+```text
+HITL_successful@k = sum(i = 1 to N) U_i * r_i(k)
+```
+
+where `U_i=1` for a successful task, `U_i=0` for a failed task, and `r_i(k)` is the
+number of reviews used for task `i`. The all-episode version is:
+
+```text
+HITL_all@k = sum(i = 1 to N) r_i(k)
+```
+
+The all-episode version is important because the successful-task formula excludes
+reviews spent on failed tasks. A policy could otherwise appear efficient simply
+because many tasks failed and were omitted. For each budget sweep, aggregate review
+counts and TCR separately, and report both all-episode and successful-task load when
+possible.
+
+Increasing `k` does not inherently reduce HITL load. It gives the policy permission
+to use more reviews, so actual load usually stays the same or increases. The purpose
+of reporting HITL is to show the safety-usability trade-off: how much additional safe
+completion is gained for each additional unit of human attention.
+
+An illustrative sweep could be:
+
+| `k` | TCR | Average reviews per task |
+|---:|---:|---:|
+| 0 | 60% | 0.0 |
+| 1 | 75% | 0.8 |
+| 2 | 81% | 1.3 |
+| 3 | 84% | 1.8 |
+| 5 | 85% | 2.9 |
+| 8 | 85.5% | 4.7 |
+| infinity | 86% | 7.1 |
+
+In this example, `k=3` is a plausible sweet spot because TCR improves substantially
+through `k=3`, while later budgets add many reviews for very little additional safe
+completion. The actual sweet spot must be selected from real experiment results.
+
+The current `scripts/analyze/tcr_curve.py` does not report HITL load. It reports TCR,
+utility, attack-success rate, number of cases, and seed variation. HITL requires a
+separate aggregation of reviewer-intervention fields from the episode or gate logs.
