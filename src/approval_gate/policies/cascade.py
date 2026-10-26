@@ -5,26 +5,31 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from approval_gate.decisions import Decision
-from approval_gate.nodes.allowlist import Tier, classify
+from approval_gate.nodes.allowlist import Tier, ToolInfo, classify
 from approval_gate.nodes.binding import reachable, records
 from approval_gate.nodes.envelope import EnvelopeExtractor
 from approval_gate.nodes.memory import TaskMemory
-from approval_gate.nodes.risk import extract
+from approval_gate.nodes.risk import RiskFeatures, extract
 from approval_gate.nodes.scorers import FormulaScorer, decision_state
 from approval_gate.nodes.taint import DELEGATED, USER
-from approval_gate.nodes.voi import TAU_LOW, assess_voi, escalation_bar
+from approval_gate.nodes.voi import TAU_LOW, VoiResult, assess_voi, escalation_bar
 from approval_gate.policies.base import CallContext, Policy
 
 
 class CascadePolicy(Policy):
     name = "cascade"
 
-    def __init__(self, extractor: EnvelopeExtractor, scorer=None, scope_deny: bool = True,
-                 feature_extractor=None) -> None:
+    def __init__(
+        self,
+        extractor: EnvelopeExtractor,
+        scorer=None,
+        scope_deny: bool = True,
+        feature_extractor=None,
+    ) -> None:
         self.extractor = extractor
         self.scorer = scorer or FormulaScorer()
         self.scope_deny = scope_deny
-        self.feature_extractor = feature_extractor   # None means the code features
+        self.feature_extractor = feature_extractor  # None means the code features
         self.memory = TaskMemory()
 
     def start_task(self, task_id: str, user_prompt: str) -> None:
@@ -50,45 +55,75 @@ class CascadePolicy(Policy):
         if self.memory.denied_repeat(ctx.tool_call):
             return Decision.AUTO_DENY, "memory_repeat"
 
+        features, value, bar = self._assess_call(ctx, info)
+
+        if (
+            self.scope_deny
+            and info.level == 4
+            and features.tool_unexpected == 1.0
+            and features.origin not in (USER, DELEGATED)
+        ):
+            return Decision.AUTO_DENY, "scope_deny"
+        if value.voi >= bar:
+            return Decision.ESCALATE, "voi"
+        if value.auto_approve:
+            return Decision.AUTO_APPROVE, "voi_approve"
+        return Decision.AUTO_DENY, "voi_deny"
+
+    def _extract_features(self, ctx: CallContext) -> tuple[RiskFeatures, dict]:
+        """Prepare risk features and record any feature-model usage."""
         trusted = reachable(ctx.user_prompt, self.records)
         feature_info = {"feature_source": "code"}
         if self.feature_extractor is None:
-            f = extract(ctx, self.envelope, self.memory, trusted)
+            features = extract(ctx, self.envelope, self.memory, trusted)
         else:
-            f = self.feature_extractor.extract(ctx, self.envelope, self.memory, trusted)
+            features = self.feature_extractor.extract(ctx, self.envelope, self.memory, trusted)
             fx = self.feature_extractor.last
-            feature_info = {"feature_source": self.feature_extractor.name,
-                            "feature_status": fx.get("status"), "feature_reason": fx.get("reason"),
-                            "feature_latency_ms": fx.get("latency_ms")}
+            feature_info = {
+                "feature_source": self.feature_extractor.name,
+                "feature_status": fx.get("status"),
+                "feature_reason": fx.get("reason"),
+                "feature_latency_ms": fx.get("latency_ms"),
+            }
             if fx.get("tokens_in") or fx.get("tokens_out"):
                 ctx.features.setdefault("tokens_in", {})["features"] = fx["tokens_in"]
                 ctx.features.setdefault("tokens_out", {})["features"] = fx["tokens_out"]
+        return features, feature_info
+
+    def _assess_call(
+        self, ctx: CallContext, info: ToolInfo
+    ) -> tuple[RiskFeatures, VoiResult, float]:
+        """Score a non-read call and record costs and diagnostics before deciding."""
+        features, feature_info = self._extract_features(ctx)
         state = None
         if self.scorer.needs_state:
-            state = decision_state(ctx, self.envelope, self.memory, f, self.scorer.include_checks)
-        R = self.scorer.score(f, state)
+            state = decision_state(
+                ctx, self.envelope, self.memory, features, self.scorer.include_checks
+            )
+        risk = self.scorer.score(features, state)
         scored = self.scorer.last
         if scored.get("tokens_in") or scored.get("tokens_out"):
             ctx.features.setdefault("tokens_in", {})["risk_scorer"] = scored["tokens_in"]
             ctx.features.setdefault("tokens_out", {})["risk_scorer"] = scored["tokens_out"]
-        v = assess_voi(R, info.harm, f.deviation, info.tier)
+        value = assess_voi(risk, info.harm, features.deviation, info.tier)
         bar = self.bar(ctx)
         ctx.features.update(
-            taint_flags=f.taint, envelope_deviation=f.deviation, risk_R=R, voi=v.voi,
-            tau_low=TAU_LOW, tau_esc=None if bar == float("inf") else bar,
-            risk_features={**asdict(f), **feature_info, "scorer": self.scorer.name,
-                           "scorer_status": scored.get("status", "ok"),
-                           "scorer_latency_ms": scored.get("latency_ms")},
+            taint_flags=features.taint,
+            envelope_deviation=features.deviation,
+            risk_R=risk,
+            voi=value.voi,
+            tau_low=TAU_LOW,
+            tau_esc=None if bar == float("inf") else bar,
+            risk_features={
+                **asdict(features),
+                **feature_info,
+                "scorer": self.scorer.name,
+                "scorer_status": scored.get("status", "ok"),
+                "scorer_latency_ms": scored.get("latency_ms"),
+            },
         )
 
-        if (self.scope_deny and info.level == 4 and f.tool_unexpected == 1.0
-                and f.origin not in (USER, DELEGATED)):
-            return Decision.AUTO_DENY, "scope_deny"
-        if v.voi >= bar:
-            return Decision.ESCALATE, "voi"
-        if v.auto_approve:
-            return Decision.AUTO_APPROVE, "voi_approve"
-        return Decision.AUTO_DENY, "voi_deny"
+        return features, value, bar
 
     def observe(self, ctx: CallContext, approved: bool, decided_by: str) -> None:
         if decided_by != "allowlist":
