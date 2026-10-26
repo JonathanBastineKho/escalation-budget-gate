@@ -1,7 +1,7 @@
 """TCR@k curves and table for the report, from the CSVs in results_csv_only. Makes no LLM calls.
 
 Policies: full approve and full escalate (the two baselines) and the full cascade, for
-workspace, travel and slack, clean and under both attacks. Each (suite, attack, policy)
+workspace, travel, slack and banking, clean and under both attacks. Each (suite, attack, policy)
 cell is read from one pinned source below; every budget must hold the suite's full case
 set or the script stops.
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 import matplotlib
@@ -25,8 +26,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 ROOT = Path("results_csv_only")
-SUITES = ["workspace", "travel", "slack"]
-CASES = {"workspace": (40, 560), "travel": (20, 140), "slack": (21, 105)}
+SUITES = ["workspace", "travel", "slack", "banking"]
+CASES = {"workspace": (40, 560), "travel": (20, 140), "slack": (21, 105), "banking": (16, 144)}
 ATTACKS = ["none", "important_instructions_generic", "tool_knowledge_generic"]
 K_ORDER = ["0", "1", "3", "5", "8", "inf"]
 POLICIES = ["full_approve", "full_escalate", "cascade"]
@@ -77,10 +78,11 @@ TEJA_TRAVEL_TOOL = "results_csv_teja/travel_tool_knowledge.csv"
 
 # One pinned source per (suite, attack, policy).
 SOURCES = {}
-for attack in ATTACKS:
-    for policy in POLICIES:
-        SOURCES[("workspace", attack, policy)] = lambda a=attack, p=policy: report_metrics(
-            RQ, "workspace", a, p, source="v2")
+for suite in ("workspace", "banking"):
+    for attack in ATTACKS:
+        for policy in POLICIES:
+            SOURCES[(suite, attack, policy)] = lambda s=suite, a=attack, p=policy: report_metrics(
+                RQ, s, a, p, source="v2")
 for policy in POLICIES:
     SOURCES[("travel", "none", policy)] = lambda p=policy: report_metrics(
         ANANYA, "travel", "none", p, source="results")
@@ -102,6 +104,11 @@ SOURCES[("travel", "important_instructions_generic", "cascade")] = lambda: jerom
     "travel", "important_instructions_generic", "cascade", ["v3/", "cascade-travel-remaining-20261019-082222/"])
 
 
+def pct(safe: int, n: int) -> float:
+    """Percent to one decimal, halves rounded up (as in the report's tables)."""
+    return float((Decimal(100 * safe) / n).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
 def load() -> list[dict]:
     rows = []
     for (suite, attack, policy), read in SOURCES.items():
@@ -115,7 +122,7 @@ def load() -> list[dict]:
             if n != expected:
                 raise SystemExit(f"{suite}/{attack}/{policy} k={k}: {n} cases, expected {expected}")
             rows.append({"suite": suite, "condition": attack, "policy": policy, "k": k,
-                         "n": n, "safe": safe, "tcr": round(100 * safe / n, 1)})
+                         "n": n, "safe": safe, "tcr": pct(safe, n)})
     # Pool both attacks per (suite, policy, k).
     for suite in SUITES:
         for policy in POLICIES:
@@ -125,7 +132,7 @@ def load() -> list[dict]:
                 assert len(parts) == 2, (suite, policy, k)
                 n, safe = sum(r["n"] for r in parts), sum(r["safe"] for r in parts)
                 rows.append({"suite": suite, "condition": "attacks", "policy": policy, "k": k,
-                             "n": n, "safe": safe, "tcr": round(100 * safe / n, 1)})
+                             "n": n, "safe": safe, "tcr": pct(safe, n)})
     return rows
 
 
@@ -171,7 +178,7 @@ def panel(ax, rows, suite, condition, show_ylabel, show_xlabel):
 
 
 def figure(rows, conditions, out_base: Path):
-    fig, axes = plt.subplots(len(conditions), len(SUITES), figsize=(9.6, 2.6 * len(conditions) + 0.5),
+    fig, axes = plt.subplots(len(conditions), len(SUITES), figsize=(12.8, 2.6 * len(conditions) + 0.5),
                              sharey=True, squeeze=False)
     for i, condition in enumerate(conditions):
         for j, suite in enumerate(SUITES):
