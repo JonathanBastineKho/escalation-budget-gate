@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import json
 import subprocess
@@ -18,18 +17,10 @@ from unittest.mock import Mock, patch
 from agentdojo.functions_runtime import FunctionCall
 from agentdojo.types import text_content_block_from_string
 
-ROOT = Path(__file__).resolve().parents[1]
+from _support import PROJECT_ROOT, load_script
 
-
-def module(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    result = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(result)
-    return result
-
-
-runner = module("run_benchmark", ROOT / "scripts/run_benchmark.py")
-report = module("compare_judges", ROOT / "scripts/analyze/compare_judges.py")
+runner = load_script("run_benchmark", "scripts/run_benchmark.py")
+report = load_script("compare_judges", "scripts/analyze/compare_judges.py")
 
 
 class ScriptedAgent:
@@ -66,7 +57,7 @@ class RunnerTests(unittest.TestCase):
         result = subprocess.run(
             [
                 sys.executable,
-                str(ROOT / "scripts/run_benchmark.py"),
+                str(PROJECT_ROOT / "scripts/run_benchmark.py"),
                 "--model",
                 "fixture-agent",
                 "--policy",
@@ -78,7 +69,7 @@ class RunnerTests(unittest.TestCase):
                 "--dry-run",
                 *extra,
             ],
-            cwd=ROOT,
+            cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
         )

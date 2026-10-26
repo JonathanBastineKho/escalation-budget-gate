@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-import importlib.util
 import io
 import json
 import sys
@@ -17,6 +15,7 @@ from unittest.mock import Mock, patch
 
 from agentdojo.task_suite.load_suites import get_suite
 
+from _support import judge_arguments, load_script
 from approval_gate.attacks import ImportantInstructionsPreserving, ToolKnowledgePreserving
 from approval_gate.authorization_eval import (
     evaluate,
@@ -25,31 +24,17 @@ from approval_gate.authorization_eval import (
     prepare_case,
     summarize,
 )
-from approval_gate.judge_config import add_judge_arguments, judge_identity, resolve_judge_config
+from approval_gate.judge_config import judge_identity, resolve_judge_config
 from approval_gate.judging import ChatJudge, Judgment
 from approval_gate.sandbox import AgentDojoPreview
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def module(name, path):
-    spec = importlib.util.spec_from_file_location(name, ROOT / path)
-    result = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(result)
-    return result
-
-
-calibration = module("calibrate_judge", "scripts/analyze/calibrate_judge.py")
-report = module("compare_workflow", "scripts/analyze/compare_judges.py")
-sweep = module("sweep_workflow", "scripts/sweep_k.py")
+calibration = load_script("calibrate_judge", "scripts/analyze/calibrate_judge.py")
+report = load_script("compare_workflow", "scripts/analyze/compare_judges.py")
+sweep = load_script("sweep_workflow", "scripts/sweep_k.py")
 
 
 def arguments(*extra):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="test-model")
-    parser.add_argument("--reviewer-model", default=None)
-    add_judge_arguments(parser)
-    return parser.parse_args(extra)
+    return judge_arguments(*extra)
 
 
 def dev_scores():

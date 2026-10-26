@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-import importlib.util
 import io
 import json
 import sys
@@ -16,33 +14,34 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from agentdojo.functions_runtime import FunctionCall, FunctionsRuntime
 from agentdojo.agent_pipeline.llms.openai_llm import _message_to_openai
+from agentdojo.functions_runtime import FunctionCall, FunctionsRuntime
 
+from _support import judge_arguments, load_script
 from approval_gate.authorization_eval import ALL_POLICIES, evaluate, prepare_case, score_action
 from approval_gate.evidence import CHECKS, evidence_sources, validate_checks
 from approval_gate.executor import _tool_result_message
-from approval_gate.judge_config import add_judge_arguments, resolve_judge_config
+from approval_gate.judge_config import resolve_judge_config
 from approval_gate.judging import ChatJudge, Judgment, fingerprint
 from approval_gate.policies.base import CallContext
 from approval_gate.policies.judge import DirectJudgePolicy, SandboxEffectsJudgePolicy
 from approval_gate.sandbox import AgentDojoPreview
 from approval_gate.sandbox_study import (
-    STUDY_POLICIES, TARGET, build_report, render_probe_report, render_report,
-    small_dataset, small_development_probe, small_preflight,
+    STUDY_POLICIES,
+    TARGET,
+    build_report,
+    render_probe_report,
+    render_report,
+    small_dataset,
+    small_development_probe,
+    small_preflight,
     validate_small_fixtures,
 )
 from approval_gate.thresholds import calibrate_separate
 
-ROOT = Path(__file__).resolve().parents[1]
-
 
 def arguments(*extra):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="qwen3.8:27b")
-    parser.add_argument("--reviewer-model", default=None)
-    add_judge_arguments(parser)
-    return parser.parse_args(["--judge-verdict-format", "evidence", *extra])
+    return judge_arguments("--judge-verdict-format", "evidence", *extra, model="qwen3.8:27b")
 
 
 def checks_for(state, label="APPROVE"):
@@ -429,10 +428,7 @@ class EffectTests(unittest.TestCase):
 
 class CalibrationAndStudyTests(unittest.TestCase):
     def runner(self):
-        spec = importlib.util.spec_from_file_location("small_runner", ROOT/"scripts/run_sandbox_study.py")
-        runner = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(runner)
-        return runner
+        return load_script("small_runner", "scripts/run_sandbox_study.py")
 
     def evaluation(self, split="development", bad_baselines=False):
         data = small_dataset(split)
