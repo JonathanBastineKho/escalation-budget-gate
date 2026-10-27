@@ -79,7 +79,6 @@ start a server themselves.
 | `full_escalate` | Request review for every gated call. |
 | `cascade_n1` | Approve read-only calls; request review for other calls. |
 | `cascade` | Combine the read allowlist, task memory, risk features, and a budget-aware review threshold. |
-| `static_threshold` | Use the cascade with a fixed review threshold. |
 | `direct_judge` | Judge the user request, tool schema, proposed arguments, and history. |
 | `sandbox_judge` | Give the judge the same evidence plus a disposable preview's tool return/error. |
 | `sandbox_effects_judge` | Also provide scoped before/after records of changes in the preview. |
@@ -87,8 +86,10 @@ start a server themselves.
 The **agent** proposes calls. The **automated judge**, where used, decides whether
 to approve, deny, or escalate. The **simulated reviewer** resolves escalations.
 These roles may use the same model, but their prompts and responsibilities differ.
-For cascade policies, the gate's LLM calls and reviewer use `--reviewer-model`
-(default: the agent model). Judge policies can select `--judge-model` separately.
+For cascade policies, envelope extraction, optional LLM feature extraction, and
+review use `--reviewer-model` (default: the agent model). Native Decision-2 risk
+scoring uses `--decision-model` separately. Judge policies select their automated
+judge with `--judge-model`.
 
 Only attempted reviewer interventions consume `k`; automated judgment and preview
 calls have separate costs. At `k=0`, escalation becomes denial. At `k=inf`, review
@@ -131,7 +132,7 @@ Remove `--dry-run` to execute inference. For a clean run, omit both `--attack` a
 set. `--force-rerun` avoids reuse of AgentDojo's cached trajectories, but does not
 clear appended case/decision logs: use a fresh result directory for each experiment.
 
-Cascade and static-threshold variants accept `--features code|llm`,
+The `cascade` policy accepts `--features code|llm`,
 `--risk-model formula|decision|decision-nochecks`, and `--no-scope-deny`. These
 change experimental behavior. Record them with the results; native risk scoring
 also needs the Decision-2 dependencies and model revision.
@@ -162,7 +163,7 @@ a failing cell. A single `run_benchmark.py` invocation does not perform prefligh
 Preflight checks response validity and usage; it does not establish judge quality.
 
 Use development data to select thresholds before held-out evaluation. The
-[legacy judge validation workflow](src/experiment-notes.md#legacy-two-policy-validation-workflow)
+[legacy judge validation workflow](experiment-notes.md#legacy-two-policy-validation-workflow)
 contains the separate preflight, authorization evaluation, and calibration commands.
 Its shared score cutoff and the fixed-call study's evidence-based threshold pair
 are different protocols; keep settings and calibration artifacts matched.
@@ -218,7 +219,7 @@ approval/denial threshold pair qualifies for the effects policy, it records
 
 See the [fixture definitions](src/approval_gate/config/authorization_sandbox_small_development.json),
 [recorded findings](SANDBOX_FINDINGS.md), and
-[archived study details](src/experiment-notes.md#small-qwen-study--current-workflow)
+[archived study details](experiment-notes.md#small-qwen-study--current-workflow)
 for the evaluation criteria and development history. Results from these small,
 related failure families should not be read as benchmark-wide protection claims.
 
@@ -230,9 +231,21 @@ and preserve the original artifacts when regenerating tables.
 | Tool | Input and purpose |
 | --- | --- |
 | `report_metrics.py` | Result roots containing `cases/` and `decisions/`; general metrics and per-tool handling. |
+| `report_metrics_all.py` | Recursively discover result sources under a root and run the general report, distinguishing sources by their relative paths. |
 | `compare_judges.py` | Matched case logs with comparison IDs; judge/control comparisons with health accounting. |
 | `tcr_curve.py` | AgentDojo `runs/` trajectories; TCR curves and CSVs. |
+| `tcr_at_k_report.py` | Selected CSV sources in `results_csv_only/`; main-report TCR figures and tables. |
+| `tcr_at_k_all_policies.py` | Selected CSV sources in `results_csv_only/`; appendix TCR figures, CSV, and LaTeX table rows. |
 | `compare_sandbox_study.py` | Saved development, calibration, and held-out JSON; fixed-call report printed to stdout. |
+
+`report_metrics_all.py` retains the general report's scoring, within-source rerun
+selection, attack pooling, and completeness checks. Its relative source paths
+avoid basename collisions; partial runs and judge-health failures remain included.
+
+The two CSV-based TCR scripts use source selections defined in their code. Check
+those selections against the intended report inputs before running them. Both
+accept `--figures` and `--tables` output directories, defaulting to
+`results/figures/` and `results/tables/`.
 
 ```bash
 python scripts/analyze/report_metrics.py "$RUN" \
@@ -346,7 +359,7 @@ reporting scripts still need dedicated regression coverage.
 | `scripts/`, `scripts/analyze/`, `scripts/nscc/` | Experiment runners, offline analysis, and cluster launcher. |
 | `tests/` | Offline regression and workflow tests. |
 | `results/share/`, `results_csv_only/` | Retained experiment artifacts and exported tables. |
-| `src/experiment-notes.md`, `SANDBOX_FINDINGS.md` | Archived discussion/workflows and recorded findings. |
+| `experiment-notes.md`, `SANDBOX_FINDINGS.md` | Archived discussion/workflows and recorded findings. |
 
 Gated benchmark runs write sibling `runs/`, `cases/`, and `decisions/` directories.
 Judge policies and matched full-approve/full-escalate controls also write
@@ -371,4 +384,4 @@ Common issues:
   selected cases, and calibration identity; retain unmatched results separately.
 
 Historical results and development commentary are preserved in
-[the experiment archive](src/experiment-notes.md) and [sandbox findings](SANDBOX_FINDINGS.md).
+[the experiment archive](experiment-notes.md) and [sandbox findings](SANDBOX_FINDINGS.md).

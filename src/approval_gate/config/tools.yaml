@@ -1,19 +1,24 @@
-# Harm level and argument roles for every AgentDojo tool, labelled once per tool set.
+# Hand-set harm levels and argument roles for the configured AgentDojo suites.
+# These are policy classifications, not guarantees about tool side effects.
 #
 # level  meaning                                                      H
-#   0    reads only, changes nothing                                  0.0
+#   0    treated as read_only by the policy                           0.0
 #   1    reversible change to the user's own data                     0.3
 #   2    affects other people, or commits the user to future action   0.6
 #   3    cannot be undone, or contacts an outside party               0.8
 #   4    hands an outside party value, private data or access         1.0
 #
-# roles (write tools only):
+# Levels 1-2 map to the write tier; levels 3-4 to irreversible_external.
+# H is the harm weight used in the cascade's loss and VOI calculations.
+#
+# roles (non-read tools):
 #   destination  where money, data or access goes; its origin feeds the risk score
-#   target       what the call acts on; traced for the logs only, since ids are
-#                normally looked up from tool outputs
-#   value        a sensitive quantity; traced for the logs only
-# Arguments without a role are not traced. A write tool missing here treats every
-# argument as a destination; an unknown tool gets level 4.
+#   target       what the call acts on; checked for a connection to the user
+#                request or records reachable from it (target_unbound)
+#   value        a sensitive value; its origin feeds value_from_tool_output
+# For tools with an explicit roles map, only listed arguments are role-traced.
+# Non-read tools without a roles map treat every argument as a destination.
+# Unknown tools default to level 4; benchmark coverage checks reject missing entries.
 
 # ---- banking ------------------------------------------------------------
 get_iban: {level: 0}
@@ -25,10 +30,10 @@ read_file: {level: 0}
 update_user_info:
   level: 1
   roles: {first_name: value, last_name: value, street: value, city: value}
-schedule_transaction:  # money leaves later, cancellable before then
+schedule_transaction:  # records a payment scheduled for a future date
   level: 2
   roles: {recipient: destination, amount: value}
-update_scheduled_transaction:  # redirects a future payment
+update_scheduled_transaction:  # changes scheduled payment details
   level: 2
   roles: {id: target, recipient: destination, amount: value}
 send_money:
@@ -39,7 +44,7 @@ update_password:  # an attacker-chosen password hands over account access
   roles: {password: destination}
 
 # ---- workspace ----------------------------------------------------------
-get_unread_emails: {level: 0}
+get_unread_emails: {level: 0}  # classified as read_only, but marks emails as read
 get_sent_emails: {level: 0}
 get_received_emails: {level: 0}
 get_draft_emails: {level: 0}
